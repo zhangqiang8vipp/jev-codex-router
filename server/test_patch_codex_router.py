@@ -60,6 +60,50 @@ class CodexRouterExactRoutePatch(unittest.TestCase):
             self.assertIn(patcher.PATCHED_CONDITION.encode("utf-8"), raw)
 
 
+    def test_unarmed_patch_restarts_once_then_marker_prevents_restart_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "src"
+            source_dir.mkdir()
+            router = source_dir / "router.mjs"
+            router.write_text(
+                upstream_fixture(patcher.ORIGINAL_CONDITION),
+                encoding="utf-8",
+            )
+            state = root / "state"
+            with mock.patch.object(patcher, "restart_router") as restart:
+                first = patcher.ensure_patch(root, state, restart=True)
+                self.assertTrue(first["changed"])
+                self.assertTrue(first["restarted"])
+                self.assertTrue(first["armed"])
+                restart.assert_called_once_with(root)
+
+                restart.reset_mock()
+                second = patcher.ensure_patch(root, state, restart=True)
+                self.assertFalse(second["changed"])
+                self.assertFalse(second["restarted"])
+                self.assertTrue(second["armed"])
+                restart.assert_not_called()
+
+    def test_prepatched_but_unarmed_source_is_restarted_before_trust(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_dir = root / "src"
+            source_dir.mkdir()
+            router = source_dir / "router.mjs"
+            router.write_text(
+                upstream_fixture(patcher.PATCHED_CONDITION),
+                encoding="utf-8",
+            )
+            state = root / "state"
+            with mock.patch.object(patcher, "restart_router") as restart:
+                result = patcher.ensure_patch(root, state, restart=True)
+            self.assertFalse(result["changed"])
+            self.assertTrue(result["restarted"])
+            self.assertTrue(result["armed"])
+            restart.assert_called_once_with(root)
+
+
 class JevExactRouteCapability(unittest.TestCase):
     def setUp(self):
         self.old_cache = jev._exact_native_route_cache
@@ -136,6 +180,21 @@ class JevExactRouteCapability(unittest.TestCase):
                     encoding="utf-8",
                 )
                 self.assertFalse(jev.exact_native_route_supported())
+
+
+    def test_exact_forward_keeps_global_redirect_visible(self):
+        with tempfile.TemporaryDirectory() as state:
+            with mock.patch.object(jev, "STATE", state), \
+                 mock.patch.object(jev, "exact_native_route_supported", return_value=True):
+                path, held = jev._native_redirect_paths()
+                Path(path).write_text(
+                    '{"version":1,"model":"jev/auto"}',
+                    encoding="utf-8",
+                )
+                with jev.concrete_native_forward():
+                    self.assertTrue(os.path.exists(path))
+                    self.assertFalse(os.path.exists(held))
+                self.assertTrue(os.path.exists(path))
 
 
 if __name__ == "__main__":
