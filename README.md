@@ -134,6 +134,9 @@ The production router now asks a cheaper question before it asks Jev:
 - exact replay of the same user turn → KEEP the existing semantic decision;
 - tool call/result continuation → KEEP;
 - background or compaction continuation → KEEP;
+- transport replay of the same tool result → KEEP without double-counting failure;
+- if operational fallback actually completes on a stronger native model, keep
+  that physical model for the rest of the turn;
 - one failed tool result → KEEP;
 - two consecutive failed tool steps → raise locally to at least Sol + high;
 - three → raise locally to at least Astra + xhigh;
