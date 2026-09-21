@@ -2359,3 +2359,26 @@ def print_installation_check(result):
 def main(argv=None):
     argv = list(argv if argv is not None else __import__("sys").argv[1:])
     if argv == ["--check"]:
+        return print_installation_check(installation_check(require_model=True))
+    if argv == ["--check-core"]:
+        return print_installation_check(installation_check(require_model=False))
+    if argv:
+        print("usage: python3 server/jev_server.py [--check|--check-core]", flush=True)
+        return 2
+
+    server = ThreadingHTTPServer(LISTEN, Handler)
+    server.daemon_threads = True
+    os.makedirs(STATE, exist_ok=True)
+    for path in (LOG_PATH, SHADOW_EVAL_PATH, SESSION_PATH):
+        try:
+            if os.path.exists(path):
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
+    print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
