@@ -3,6 +3,7 @@ param(
   [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
   [string]$JevEnvFile = "",
   [string]$StateDir = "",
+  [string]$RouterDir = "",
   [string]$TaskName = "Jev Codex Router",
   [string]$EvalTaskName = "Jev Codex Router Shadow Eval"
 )
@@ -26,6 +27,12 @@ function Resolve-Python {
 }
 
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
+if (-not [string]::IsNullOrWhiteSpace($RouterDir)) {
+  $RouterDir = [IO.Path]::GetFullPath($RouterDir)
+  if (-not (Test-Path -LiteralPath (Join-Path $RouterDir "src\control.mjs") -PathType Leaf)) {
+    throw "Codex Router control.mjs not found under: $RouterDir"
+  }
+}
 $runService = Join-Path $RepoRoot "server\run-service.ps1"
 $runReport = Join-Path $RepoRoot "server\run-shadow-report.ps1"
 $server = Join-Path $RepoRoot "server\jev_server.py"
@@ -72,7 +79,8 @@ $serviceArgs = @(
   "-File", ('"{0}"' -f $runService),
   "-RepoRoot", ('"{0}"' -f $RepoRoot),
   "-JevEnvFile", ('"{0}"' -f $JevEnvFile),
-  "-StateDir", ('"{0}"' -f $StateDir)
+  "-StateDir", ('"{0}"' -f $StateDir),
+  "-RouterDir", ('"{0}"' -f $RouterDir)
 ) -join " "
 
 $serviceAction = New-ScheduledTaskAction -Execute $powerShell -Argument $serviceArgs
@@ -134,6 +142,9 @@ if (-not $healthy) {
 $python = Resolve-Python
 $env:JEV_ENV_FILE = $JevEnvFile
 $env:CODEX_ROUTER_STATE_DIR = $StateDir
+if (-not [string]::IsNullOrWhiteSpace($RouterDir)) {
+  $env:CODEX_ROUTER_DIR = $RouterDir
+}
 $checkArgs = @($python.Prefix) + @($server, "--check-core")
 & $python.Path @checkArgs
 if ($LASTEXITCODE -ne 0) {
