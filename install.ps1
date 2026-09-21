@@ -380,9 +380,10 @@ function Ensure-CodexRouterBaseInstalled([string]$Directory) {
   $forceOpenSslRepair = Test-HistoricalOpenSslCrash
   Prepare-And-VerifyCodexRouterPython $Directory $forceOpenSslRepair
 
-  # Install the upstream router in credential-free idle mode. When an old
-  # OPENSSL_Applink crash was present, the venv has already been rebuilt and
-  # the LiteLLM proxy has been boot-tested above.
+  # Install the upstream router with an explicit empty external-provider
+  # selection, while leaving credential discovery enabled. Jev setup below
+  # needs Codex's local ChatGPT session sharing, which is intentionally blocked
+  # by upstream when discovery is disabled.
   Write-Step "Installing/repairing the Codex Router base service"
   $routerInstall = Join-Path $Directory "install.ps1"
   $log = Get-CodexRouterLogPath
@@ -394,7 +395,6 @@ function Ensure-CodexRouterBaseInstalled([string]$Directory) {
     "-File", $routerInstall,
     "-Target", "codex",
     "-NoProvider",
-    "-NoDiscovery",
     "-NoTray"
   )
   & powershell.exe @routerInstallArgs
