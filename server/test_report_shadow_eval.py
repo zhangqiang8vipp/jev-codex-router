@@ -18,6 +18,9 @@ class ShadowReport(unittest.TestCase):
             "smart_route": {"model": smart_model, "effort": smart_effort},
             "served_route": {"model": smart_model, "effort": smart_effort},
             "route_changed": False,
+            "route_source": "jev",
+            "route_reason": "new_user_turn",
+            "jev_cache": "miss",
             "success": success,
             "retry_count": 0,
             "total_ms": 1000,
@@ -74,6 +77,22 @@ class ShadowReport(unittest.TestCase):
         self.assertEqual(transition["to"], "gpt-5.6-sol:medium")
         self.assertIn("raw_estimated_credits", transition)
         self.assertNotIn("raw_quality", transition)
+
+
+    def test_route_source_counts_lease_reuse_without_claiming_a_jev_call(self):
+        first = self.turn("a", "gpt-5.6-sol", "high")
+        second = self.turn("b", "gpt-5.6-sol", "high")
+        second["_at"] = report.datetime.datetime(2026, 9, 21, 12, 1, 0)
+        second["route_source"] = "lease"
+        second["route_reason"] = "tool_continuation"
+        second["jev_cache"] = None
+        second["jev_route"] = None
+        result = report.summarize([first, second], {}, {}, 7, 1)
+        self.assertEqual(result["jev_decision_turns"], 1)
+        self.assertEqual(result["jev_attempt_turns"], 1)
+        self.assertEqual(result["jev_paid_call_turns"], 1)
+        self.assertEqual(result["lease_reuse_turns"], 1)
+        self.assertEqual(result["lease_reuse_rate"], 0.5)
 
 
 if __name__ == "__main__":
