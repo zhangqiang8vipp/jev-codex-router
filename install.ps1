@@ -109,12 +109,17 @@ function Install-CodexRouterCheckout {
 
     # Install the upstream router in credential-free idle mode. Jev setup below
     # adds the only provider we need and enables the shared ChatGPT session.
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $temp \
-      -Target codex \
-      -NoProvider \
-      -NoDiscovery \
-      -NoTray \
-      -InstallDir $target
+    $routerInstallArgs = @(
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-File", $temp,
+      "-Target", "codex",
+      "-NoProvider",
+      "-NoDiscovery",
+      "-NoTray",
+      "-InstallDir", $target
+    )
+    & powershell.exe @routerInstallArgs
 
     if ($LASTEXITCODE -ne 0) {
       throw "Codex Router installer exited with status $LASTEXITCODE."
