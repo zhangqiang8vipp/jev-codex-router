@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Jev Codex Router — local server on 127.0.0.1:4319 for the Codex Router.
 
 Receives Responses requests destined for the "jev/auto" model (the Codex
@@ -223,6 +223,20 @@ _route_cache = {}
 _route_flights = {}
 
 
+class ResponseCommittedError(Exception):
+    """The downstream response has started, so no retry/second response is legal."""
+
+
+def _bounded_timeout(deadline, cap):
+    """Return a socket timeout capped by the remaining wall-clock budget."""
+    if deadline is None:
+        return cap
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("upstream deadline exceeded")
+    return max(0.05, min(float(cap), remaining))
+
+
 class _RouteFlight:
     def __init__(self):
         self.event = threading.Event()
@@ -382,59 +396,89 @@ def quota_failure_sse(error):
 
 # The host's native redirect is deliberately all-or-nothing: it reroutes every
 # native turn (including the concrete tier this router just selected) back to
-# jev/auto, which would otherwise recurse Python -> Node -> Python forever and
-# flood the upstream. Serialize routed turns and move the redirect state file
-# aside only while concrete tiers are being served, then restore it.
+# jev/auto. Until the caller edge has a scoped bypass, concrete forwards move
+# that state file aside. The move is reference-counted so overlapping forwards
+# do not restore it early; only the filesystem transitions are locked.
 _NATIVE_REDIRECT_LOCK = threading.Lock()
 _NATIVE_REDIRECT_NAME = "native-redirect.json"
 _NATIVE_REDIRECT_HELD_NAME = "native-redirect.json.routing-held"
-
-
 _NATIVE_REDIRECT_DEPTH = 0
-_NATIVE_REDIRECT_CAPTURED = None
+
+
+def _native_redirect_paths():
+    return (
+        os.path.join(STATE, _NATIVE_REDIRECT_NAME),
+        os.path.join(STATE, _NATIVE_REDIRECT_HELD_NAME),
+    )
+
+
+def recover_native_redirect():
+    """Recover a redirect left aside by an interrupted previous process.
+
+    If both files exist, the live path is newer/operator-owned and wins.
+    """
+    path, held = _native_redirect_paths()
+    with _NATIVE_REDIRECT_LOCK:
+        if _NATIVE_REDIRECT_DEPTH != 0:
+            return False
+        try:
+            if os.path.exists(path):
+                if os.path.exists(held):
+                    os.remove(held)
+                return False
+            if os.path.exists(held):
+                os.replace(held, path)
+                return True
+        except OSError:
+            pass
+    return False
 
 
 @contextlib.contextmanager
 def native_redirect_suppressed():
-    """Move native-redirect.json aside for the duration of a forward.
+    """Move native-redirect.json aside for one or more concrete forwards.
 
-    Reference counted and the lock only brackets file operations, so overlapping
-    turns never restore the redirect while another concrete forward is in flight
-    and a slow upstream wait does not serialize every request on the lock.
+    Restoration is atomic and never overwrites a redirect written by another
+    actor while suppression was active.
     """
-    global _NATIVE_REDIRECT_DEPTH, _NATIVE_REDIRECT_CAPTURED
-    path = os.path.join(STATE, _NATIVE_REDIRECT_NAME)
-    held = os.path.join(STATE, _NATIVE_REDIRECT_HELD_NAME)
+    global _NATIVE_REDIRECT_DEPTH
+    path, held = _native_redirect_paths()
     with _NATIVE_REDIRECT_LOCK:
         if _NATIVE_REDIRECT_DEPTH == 0:
-            _NATIVE_REDIRECT_CAPTURED = None
             try:
+                # Crash recovery: a previous process may have died while the
+                # redirect was held. A live path always wins over stale held
+                # state because it may reflect a newer operator choice.
+                if os.path.exists(path) and os.path.exists(held):
+                    os.remove(held)
+                elif not os.path.exists(path) and os.path.exists(held):
+                    os.replace(held, path)
                 if os.path.exists(path):
-                    with open(path, encoding="utf-8") as fh:
-                        _NATIVE_REDIRECT_CAPTURED = fh.read()
                     os.replace(path, held)
             except OSError:
-                _NATIVE_REDIRECT_CAPTURED = None
+                pass
         _NATIVE_REDIRECT_DEPTH += 1
     try:
         yield
     finally:
         with _NATIVE_REDIRECT_LOCK:
-            _NATIVE_REDIRECT_DEPTH -= 1
+            _NATIVE_REDIRECT_DEPTH = max(0, _NATIVE_REDIRECT_DEPTH - 1)
             if _NATIVE_REDIRECT_DEPTH == 0:
                 try:
-                    if _NATIVE_REDIRECT_CAPTURED is not None and not os.path.exists(path):
-                        with open(path, "w", encoding="utf-8") as fh:
-                            fh.write(_NATIVE_REDIRECT_CAPTURED)
-                        try:
-                            os.chmod(path, 0o600)
-                        except OSError:
-                            pass
-                    if os.path.exists(held):
-                        os.remove(held)
+                    if os.path.exists(path):
+                        # A newer actor wrote redirect state while the forward
+                        # was active. Do not clobber it with our saved copy.
+                        if os.path.exists(held):
+                            os.remove(held)
+                    elif os.path.exists(held):
+                        os.replace(held, path)
                 except OSError:
                     pass
-                _NATIVE_REDIRECT_CAPTURED = None
+
+
+# Repair an interrupted suppression before the server starts answering status
+# or forwarding requests.
+recover_native_redirect()
 
 
 def key_paths():
@@ -493,53 +537,74 @@ def call_jev_routed(key, state, questions=None, timeout=4.0):
 # Circuit breaker: track per-model upstream failures so a rate-limited model
 # stops being selected for a cooldown window instead of hammering it.
 # ---------------------------------------------------------------------------
-_BREAKER = {}            # model -> (fail_count, first_fail_ts, open_until)
+_BREAKER = {}            # model -> (fail_count, first_fail_ts, open_until, probe_in_flight)
+_BREAKER_LOCK = threading.Lock()
 _BREAKER_THRESHOLD = 2   # consecutive failures before opening
 _BREAKER_OPEN_S = 60.0   # how long a model is skipped
-_BREAKER_HALF_S = 30.0   # half-open probe window
+
+
+def _breaker_unpack(entry):
+    if entry is None:
+        return 0, 0.0, 0.0, False
+    if len(entry) == 3:  # tolerate state created by an older in-memory version
+        count, first_ts, open_until = entry
+        return count, first_ts, open_until, False
+    return entry
+
 
 def breaker_record(model, ok):
-    """Record upstream result. Returns True if model is currently available."""
+    """Record one real upstream attempt and close/re-open half-open probes."""
     now = time.time()
-    entry = _BREAKER.get(model)
-    if ok:
-        if entry:
+    with _BREAKER_LOCK:
+        entry = _BREAKER.get(model)
+        if ok:
             _BREAKER.pop(model, None)
-        return True
-    if entry is None:
-        _BREAKER[model] = (1, now, 0.0)
-        return True
-    count, first_ts, open_until = entry
-    count += 1
-    if count >= _BREAKER_THRESHOLD and open_until == 0.0:
-        open_until = now + _BREAKER_OPEN_S
-    _BREAKER[model] = (count, first_ts, open_until)
-    return open_until == 0.0 or now >= open_until
+            return True
+
+        count, first_ts, open_until, probe_in_flight = _breaker_unpack(entry)
+        if entry is None:
+            count, first_ts = 1, now
+        else:
+            count += 1
+
+        # A failed half-open probe immediately re-opens the circuit. Likewise,
+        # a failure recorded after an expired open window must not silently
+        # reset the model to closed.
+        if probe_in_flight or (open_until and now >= open_until):
+            open_until = now + _BREAKER_OPEN_S
+            count = max(count, _BREAKER_THRESHOLD)
+        elif count >= _BREAKER_THRESHOLD:
+            open_until = now + _BREAKER_OPEN_S
+
+        _BREAKER[model] = (count, first_ts or now, open_until, False)
+        return open_until == 0.0
+
 
 def breaker_available(model):
-    """Check if a model is available (not in open circuit state)."""
-    entry = _BREAKER.get(model)
-    if entry is None:
-        return True
-    count, first_ts, open_until = entry
+    """Claim this model if available; exactly one caller gets a half-open probe."""
     now = time.time()
-    if open_until == 0.0:
+    with _BREAKER_LOCK:
+        entry = _BREAKER.get(model)
+        if entry is None:
+            return True
+        count, first_ts, open_until, probe_in_flight = _breaker_unpack(entry)
+        if open_until == 0.0:
+            return True
+        if now < open_until or probe_in_flight:
+            return False
+        _BREAKER[model] = (count, first_ts, open_until, True)
         return True
-    # Half-open: allow one probe after the cooldown
-    if now >= open_until + _BREAKER_HALF_S:
-        _BREAKER[model] = (0, now, 0.0)  # reset to allow probe
-        return True
-    return now >= open_until
+
 
 def breaker_pick(preferred_model):
-    """If preferred model is open, pick the next available tier upward."""
-    if breaker_available(preferred_model):
+    """Claim preferred or the next available *higher* tier; never wrap downward."""
+    if preferred_model not in TIERS:
         return preferred_model, False
-    idx = TIERS.index(preferred_model) if preferred_model in TIERS else 0
-    for candidate in list(TIERS[idx+1:]) + list(TIERS[:idx]):
+    idx = TIERS.index(preferred_model)
+    for candidate in TIERS[idx:]:
         if breaker_available(candidate):
-            return candidate, True
-    return preferred_model, False  # all open; let it try anyway
+            return candidate, candidate != preferred_model
+    return None, True
 
 
 def validate_ask(body):
@@ -1294,8 +1359,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             self._post()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, ResponseCommittedError):
+            self.close_connection = True
         except Exception as exc:  # fail-open at the response level only
             try:
                 self._json(502, {"error": {"message": f"jev-router: {exc}"}})
@@ -1322,11 +1387,6 @@ class Handler(BaseHTTPRequestHandler):
         # Our own answer signatures never travel back upstream (see
         # strip_signatures): the model must not read its own route tag.
         stripped = strip_signatures(payload)
-        try:
-            with open(os.path.join(STATE, "inbound-trace.log"), "a", encoding="utf-8") as _tf:
-                _tf.write(time.strftime("%%H:%%M:%%S") + " path=" + path + " model=" + str(payload.get("model")) + "\n")
-        except OSError:
-            pass
 
         t0 = time.time()
         debug = os.path.exists(DEBUG_PATH)
@@ -1367,6 +1427,7 @@ class Handler(BaseHTTPRequestHandler):
         decision = None
         jev_usage = None
         smart_gate = None
+        breaker_blocked = False
         if os.path.exists(OFF_PATH):
             model, effort, speed, gate = ASTRA, None, "default", "off"
         else:
@@ -1395,7 +1456,10 @@ class Handler(BaseHTTPRequestHandler):
                     # Circuit breaker: skip an open model upward without another
                     # paid Jev judgement.
                     alt_model, breaker_rerouted = breaker_pick(model)
-                    if breaker_rerouted:
+                    if alt_model is None:
+                        breaker_blocked = True
+                        smart_gate = (smart_gate + "+" if smart_gate != "apply" else "") + "breaker_open"
+                    elif breaker_rerouted:
                         model = alt_model
                         smart_gate = (smart_gate + "+" if smart_gate != "apply" else "") + "breaker"
                     if smart_gate != "apply":
@@ -1452,8 +1516,9 @@ class Handler(BaseHTTPRequestHandler):
         out_path = path if path.startswith("/v1") else "/v1" + path
         self._attempts = []
         RETRYABLE_UPSTREAM = {429, 500, 502, 503, 504}
-        # Bound total time spent escalating across tiers (seconds since request start).
+        # Hard wall-clock budget for the whole tier-escalation sequence.
         ESCALATION_DEADLINE = 75.0
+        escalation_deadline = time.monotonic() + ESCALATION_DEADLINE
         attempt_model = model
         attempt_effort = effort
         status = 0
@@ -1463,49 +1528,97 @@ class Handler(BaseHTTPRequestHandler):
 
         if stream_requested:
             # Tier-escalation loop: a failed model bumps up one tier and is
-            # retried WITHOUT another Jev decision, until success or all
-            # tiers are exhausted.
-            while True:
+            # retried WITHOUT another Jev decision, until success, all usable
+            # tiers are exhausted, or the global deadline is spent.
+            if breaker_blocked:
+                status = 503
+                out_kind = "error"
+                error_bytes = json.dumps({"error": {
+                    "type": "server_error",
+                    "message": "all eligible native model circuits are open",
+                }}).encode("utf-8")
+            while not breaker_blocked:
+                if time.monotonic() >= escalation_deadline:
+                    status = 504
+                    out_kind = "error"
+                    error_bytes = json.dumps({"error": {
+                        "type": "server_error",
+                        "message": "native model escalation deadline exceeded",
+                    }}).encode("utf-8")
+                    break
+
                 apply_route(payload, attempt_model, attempt_effort)
+                quota_hit = False
                 with native_redirect_suppressed():
                     try:
-                        status, out_kind, ctype, _q, _u, _r, error_bytes = self._forward(
+                        status, out_kind, ctype, quota_hit, _u, _r, error_bytes = self._forward(
                             payload, out_path, stream_requested, debug, marker,
-                            attempt_model, signature)
+                            attempt_model, signature, deadline=escalation_deadline)
+                    except (BrokenPipeError, ConnectionResetError, ResponseCommittedError):
+                        raise
                     except (http.client.HTTPException, ConnectionError, OSError) as exc:
-                        status = 502
+                        status = 504 if time.monotonic() >= escalation_deadline else 502
+                        if self._attempts:
+                            self._attempts[-1]["status"] = status
                         error_bytes = json.dumps({"error": {"type": "server_error",
                             "message": f"router connection failed: {exc}"}}).encode("utf-8")
-                breaker_record(attempt_model, status == 200)
+
+                # Terminal subscription exhaustion is carried to Codex as a
+                # response.failed SSE. It is handled, not a healthy upstream
+                # success and not a reason to probe another tier.
+                if not quota_hit:
+                    breaker_record(attempt_model, status == 200)
                 if status == 200:
                     break
+
                 idx = TIERS.index(attempt_model) if attempt_model in TIERS else -1
                 if (status in RETRYABLE_UPSTREAM and idx + 1 < len(TIERS)
-                        and time.time() - t0 < ESCALATION_DEADLINE):
-                    attempt_model = TIERS[idx + 1]
-                    escalated = True
-                    continue
+                        and time.monotonic() < escalation_deadline):
+                    next_model, skipped_open = breaker_pick(TIERS[idx + 1])
+                    if next_model is not None:
+                        attempt_model = next_model
+                        escalated = True
+                        if skipped_open and "+breaker" not in gate:
+                            gate = f"{gate}+breaker"
+                        continue
                 break
+
             model = attempt_model
             effort = attempt_effort
-            # All tiers failed: write the final error response now.
+            # All tiers failed before any downstream response started.
             if status != 200 and error_bytes is not None:
                 self._write_error_response(status, error_bytes)
             if escalated and status == 200:
                 gate = f"{gate}+escalated"
         else:
-            apply_route(payload, model, effort)
-            with native_redirect_suppressed():
-                status, out_kind, ctype, _q, _u, _r, error_bytes = self._forward(
-                    payload, out_path, stream_requested, debug, marker, model, signature)
-            breaker_record(model, status == 200)
+            if breaker_blocked:
+                status = 503
+                out_kind = "error"
+                error_bytes = json.dumps({"error": {
+                    "type": "server_error",
+                    "message": "all eligible native model circuits are open",
+                }}).encode("utf-8")
+                self._write_error_response(status, error_bytes)
+            else:
+                apply_route(payload, model, effort)
+                with native_redirect_suppressed():
+                    status, out_kind, ctype, quota_hit, _u, _r, error_bytes = self._forward(
+                        payload, out_path, stream_requested, debug, marker, model, signature)
+                if not quota_hit:
+                    breaker_record(model, status == 200)
 
         retried = False
         fallback = None
 
-        # Once the request has succeeded, its cached decision is no longer
-        # needed: clear it so the next message makes a fresh Jev call.
-        if status == 200:
+        # Only a completed Responses terminal event proves the request really
+        # finished. HTTP 200 alone may be response.failed, an interrupted SSE,
+        # or the transport envelope used for terminal quota.
+        final_attempt = self._attempts[-1] if self._attempts else {}
+        request_completed = (
+            status == 200
+            and final_attempt.get("terminal_type") == "response.completed"
+        )
+        if request_completed:
             invalidate_route_cache(raw)
         total_ms = int((time.time() - t0) * 1000)
         finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -1583,15 +1696,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(error_bytes)
 
-    def _forward(self, payload, out_path, stream_requested, debug, marker, model, signature=None):
+    def _forward(self, payload, out_path, stream_requested, debug, marker, model,
+                 signature=None, deadline=None):
         """One relay attempt to the local caller edge, streamed straight back.
-        Returns (status, out_kind, ctype, quota_hit, unwritten, resets_at).
-        The last three fields are retained as false/None placeholders for call
-        site and logging compatibility. This OpenAI-only router never retries a
-        quota failure on a third-party model.
+
+        Once downstream headers have been committed, failures are terminal for
+        this client connection: callers must not escalate or write a second HTTP
+        response. The deadline is monotonic and shared by all tier attempts.
         """
         body = json.dumps(payload).encode("utf-8")
-        conn = http.client.HTTPConnection(*ROUTER, timeout=30)
+        conn = http.client.HTTPConnection(
+            *ROUTER, timeout=_bounded_timeout(deadline, 30.0))
         status = 0
         out_kind = ""
         ctype = ""
@@ -1600,6 +1715,9 @@ class Handler(BaseHTTPRequestHandler):
                    "terminal_type": None, "usage": None}
         self._attempts.append(attempt)
         markerer = None
+        cap = None
+        response_started = False
+        quota_hit = False
         status = 0
         error_bytes = None
         try:
@@ -1614,7 +1732,7 @@ class Handler(BaseHTTPRequestHandler):
             # (legitimately long generations), while a fully-dead read still
             # fails after 120s instead of hanging the slot for 300s+.
             if conn.sock is not None:
-                conn.sock.settimeout(120)
+                conn.sock.settimeout(_bounded_timeout(deadline, 120.0))
             status = resp.status
             ctype = (resp.getheader("Content-Type") or "").strip()
             # The local caller edge sets NO Content-Type on SSE streams. For a
@@ -1626,7 +1744,6 @@ class Handler(BaseHTTPRequestHandler):
 
             if is_sse and stream_requested:
                 out_kind = "sse"
-                cap = None
                 if debug:
                     try:
                         cap = open(os.path.join(STATE, "jev-router-debug-stream.log"), "a", encoding="utf-8")
@@ -1637,9 +1754,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
+                response_started = True
                 markerer = SummaryMarker(marker, signature)
                 while True:
-                    chunk = resp.read1(65536) if hasattr(resp, "read1") else resp.read(65536)
+                    if conn.sock is not None:
+                        conn.sock.settimeout(_bounded_timeout(deadline, 120.0))
+                    try:
+                        chunk = resp.read1(65536) if hasattr(resp, "read1") else resp.read(65536)
+                    except (BrokenPipeError, ConnectionResetError):
+                        raise
+                    except (http.client.HTTPException, OSError) as exc:
+                        raise ResponseCommittedError(
+                            f"upstream stream failed after response start: {exc}") from exc
                     if not chunk:
                         break
                     if cap is not None:
@@ -1658,10 +1784,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-                if cap is not None:
-                    cap.close()
             else:
                 out_kind = "json"
+                if conn.sock is not None:
+                    conn.sock.settimeout(_bounded_timeout(deadline, 120.0))
                 data = resp.read()
                 out_ctype = ctype or "application/json"
                 head = data[:64].lstrip()
@@ -1693,26 +1819,34 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header("Content-Length", str(len(stream)))
                     self.send_header("Connection", "close")
                     self.end_headers()
+                    response_started = True
                     self.wfile.write(stream)
-                    # Already handled as a terminal 200; do not escalate.
+                    self.wfile.flush()
+                    attempt["terminal_type"] = "response.failed"
+                    # Already handled for this client; preserve that this was
+                    # terminal quota so breaker/cache health are not falsified.
+                    quota_hit = True
                     status = 200
                     error_bytes = None
                 else:
                     error_bytes = None
                     if status != 200 and stream_requested:
-                        # Transient upstream error: build an OpenAI-format error
-                        # but do NOT write it; the caller escalates a tier.
+                        # Keep the native upstream JSON intact. Terminal quota
+                        # was handled above; transient 429/5xx stays retryable
+                        # and, if every tier fails, Codex receives the original
+                        # error instead of a synthetic rate_limit_error.
                         out_kind = "error"
                         try:
                             parsed = json.loads(data.decode("utf-8", "replace"))
-                            inner = parsed.get("error", parsed) if isinstance(parsed, dict) else {}
                         except (ValueError, UnicodeDecodeError):
-                            inner = {}
-                        if status == 429:
-                            inner["type"] = "rate_limit_error"
-                            inner["code"] = "rate_limit_exceeded"
-                            inner.setdefault("message", "You have hit your rate limit. Check your workspace usage settings to continue.")
-                        error_bytes = json.dumps({"error": inner}).encode("utf-8")
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            error_bytes = data
+                        else:
+                            error_bytes = json.dumps({"error": {
+                                "type": "server_error",
+                                "message": "upstream returned a non-JSON error",
+                            }}).encode("utf-8")
                     else:
                         # Ordinary non-stream / success: write straight through.
                         self.send_response(status)
@@ -1720,12 +1854,26 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_header("Content-Length", str(len(data)))
                         self.end_headers()
                         self.wfile.write(data)
-            return status, out_kind, ctype, False, None, None, error_bytes
+            return status, out_kind, ctype, quota_hit, None, None, error_bytes
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except ResponseCommittedError:
+            raise
+        except (http.client.HTTPException, OSError) as exc:
+            if response_started:
+                raise ResponseCommittedError(
+                    f"upstream failed after downstream response start: {exc}") from exc
+            raise
         finally:
             attempt["status"] = status
             if markerer is not None:
                 attempt["usage"] = markerer.usage
                 attempt["terminal_type"] = markerer.terminal_type
+            if cap is not None:
+                try:
+                    cap.close()
+                except OSError:
+                    pass
             conn.close()
 
 
