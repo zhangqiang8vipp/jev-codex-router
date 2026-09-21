@@ -68,6 +68,30 @@ class TurnIdentity(unittest.TestCase):
         self.assertNotIn("data:image", first)
 
 
+
+    def test_tool_step_replay_key_is_stable_and_private(self):
+        payload = {
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "sensitive failing output",
+            }]
+        }
+        first = lease.tool_step_key(payload, session_key="session")
+        second = lease.tool_step_key(payload, session_key="session")
+        self.assertEqual(first, second)
+        self.assertNotIn("sensitive", first)
+
+    def test_changed_tool_result_gets_a_new_event_key(self):
+        a = lease.tool_step_key({
+            "input": [{"type": "function_call_output", "call_id": "c", "output": "first"}]
+        }, session_key="s")
+        b = lease.tool_step_key({
+            "input": [{"type": "function_call_output", "call_id": "c", "output": "second"}]
+        }, session_key="s")
+        self.assertNotEqual(a, b)
+
+
 class LeasePolicy(unittest.TestCase):
     def make_lease(self, turn_key="t"):
         state = lease.lease_fields(
@@ -154,6 +178,33 @@ class LeasePolicy(unittest.TestCase):
             actions.append(action)
         self.assertEqual(actions.count("REPLAN"), 1)
         self.assertEqual(actions.count("KEEP"), 6)
+
+
+
+    def test_served_higher_tier_becomes_continuity_route_for_same_turn(self):
+        current = self.make_lease("turn")
+        fields = lease.served_continuity_fields(
+            current,
+            served_model=SOL,
+            served_effort="high",
+            turn_key="turn",
+            policy_version=POLICY_VERSION,
+        )
+        self.assertIsNotNone(fields)
+        updated = lease.read_lease(fields, POLICY_VERSION)
+        self.assertEqual((updated.model, updated.effort), (SOL, "high"))
+        self.assertEqual(updated.source, "served_continuity")
+
+    def test_slow_old_turn_cannot_overwrite_newer_lease(self):
+        current = self.make_lease("new-turn")
+        fields = lease.served_continuity_fields(
+            current,
+            served_model=SOL,
+            served_effort="high",
+            turn_key="old-turn",
+            policy_version=POLICY_VERSION,
+        )
+        self.assertIsNone(fields)
 
 
 class LocalEscalation(unittest.TestCase):
