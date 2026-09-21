@@ -51,7 +51,7 @@ Log: ~/.codex/codex-router/jev-router-live.jsonl
 
 Codex-dry tandem: when native usage is exhausted — a manual flag file
 (~/.codex/codex-router/jev-router.codex-dry) or an observed quota failure
-(429 / usage-limit body) — the triptych is replaced until the window resets:
+(429 / usage-limit body) — the native four-tier set is replaced until the window resets:
 frontier-tier (astra) calls go to GLM (opencode-go/glm-5.3-flash), every
 other tier to deepseek (opencode-go/deepseek-v4.1-flash). A quota failure
 flips the state and retries the same call on the tandem; a successful native
@@ -141,7 +141,7 @@ GO_STANDARD = "deepseek/deepseek-v4.1-flash"
 GO_FRONTIER = "deepseek/deepseek-v4.1-flash"
 GO_TANDEM = (GO_STANDARD, GO_FRONTIER)
 # The tandem's own thinking ladder. Both Go models declare low/high/max where the
-# native triptych exposes low/medium/high/xhigh/max, so a depth keeps its meaning
+# native four-tier set exposes low/medium/high/xhigh/max, so a depth keeps its meaning
 # by landing on the middle rung instead of collapsing onto the floor: Jev says
 # "medium" about work it wants done carefully, and DeepSeek documents its `low`
 # as "no deep reasoning needed". The API forwarder clamps the value a second time
@@ -316,7 +316,7 @@ def mark_native_dry(reason, resets_at=None):
     """Flip to the Go tandem, for as long as the exhausted window stays shut.
 
     `resets_at` is the instant the edge said the window reopens. Ending the
-    state just after it is what sends the next call back to the native triptych
+    state just after it is what sends the next call back to the native four-tier set
     as soon as the quota returns; without that announcement the flip keeps the
     bounded cooldown instead.
     """
@@ -1208,8 +1208,8 @@ class Handler(BaseHTTPRequestHandler):
             model, effort, speed, gate = ASTRA, None, "default", "shadow(astra)"
 
         # Codex-dry tandem: ONLY while native usage is exhausted (manual flag or
-        # observed quota failure) the triptych is replaced — GLM for frontier
-        # steps, deepseek for the rest. Otherwise luna/sol/astra run untouched.
+        # observed quota failure) the native four-tier set is replaced — GLM for frontier
+        # steps, deepseek for the rest. Otherwise luna/terra/sol/astra run untouched.
         dry_reason = native_dry()
         native_model = model
         if dry_reason and model in TIERS:
@@ -1248,7 +1248,7 @@ class Handler(BaseHTTPRequestHandler):
             # Native usage is exhausted: flip to the Go tandem and retry this very
             # call so the turn does not fail (nothing reached the client yet). The
             # flip lasts until the edge says the window reopens, so the first call
-            # after the reset is served by the native triptych again.
+            # after the reset is served by the native four-tier set again.
             mark_native_dry("quota", resets_at=resets_at)
             model, effort = dry_target(native_model, effort)
             apply_route(payload, model, effort)
