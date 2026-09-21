@@ -148,7 +148,9 @@ def set_enabled(state_dir: str, router_dir: Optional[str], enabled: bool) -> Aut
     previous_model, has_backup = _read_backup(state_dir)
 
     if enabled:
-        if current_before != AUTO_ROUTE and not has_backup:
+        if current_before != AUTO_ROUTE:
+            # A stale backup from an interrupted/externally changed run must
+            # never win over the operator's current redirect choice.
             _write_backup(state_dir, current_before)
         action, target = "set", AUTO_ROUTE
     else:
