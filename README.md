@@ -271,12 +271,13 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 
 ### Windows (recommended for this fork)
 
-Prerequisites: Windows 10/11, Codex Desktop or CLI signed in with ChatGPT,
-PowerShell in FullLanguage mode, and a current
-[Codex Router](https://github.com/duolahypercho/codex-router) checkout.
-The bootstrap can install missing Node.js, Python 3 and .NET 8 SDK through
-`winget` after asking first. If the TypeSafe/Jev key is not already stored, it
-prompts for it locally with hidden input.
+Prerequisites: Windows 10/11, Codex Desktop or CLI signed in with ChatGPT, and
+PowerShell in FullLanguage mode. The bootstrap automatically installs a managed
+[Codex Router](https://github.com/duolahypercho/codex-router) checkout under
+`%LOCALAPPDATA%\codex-router` when none is found. It can also install missing
+Git, Node.js, Python 3 and .NET 8 SDK through `winget` after asking first. If
+the TypeSafe/Jev key is not already stored, it prompts for it locally with
+hidden input.
 
 Recommended install/update command:
 
@@ -285,9 +286,10 @@ irm https://raw.githubusercontent.com/zhangqiang8vipp/jev-codex-router/main/inst
 ```
 
 This is the PowerShell equivalent of `curl ... | sh`: it downloads the latest
-`main` source into `%LOCALAPPDATA%\JevCodexRouter\source`, finds the local
-Codex Router checkout, installs/updates the Jev service and Auto overlay, and
-runs the readiness checks. Re-running the same command upgrades the tool.
+`main` source into `%LOCALAPPDATA%\JevCodexRouter\source`, finds or
+automatically installs the local Codex Router checkout, installs/updates the Jev
+service and Auto overlay, and runs the readiness checks. Re-running the same
+command upgrades the tool.
 
 If Codex Router is in a non-standard folder, set it before the same command:
 
