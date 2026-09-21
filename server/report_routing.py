@@ -82,7 +82,7 @@ API_FAST_X = 2.0
 # 1,616,250 output tokens.
 MIX = {"input": 2_886_560, "cached": 2_836_607, "output": 6_819}
 
-# Short names of the native triptych, then the tandem family. Anything else is
+# Short names of the native four-tier set, then the tandem family. Anything else is
 # reported under its own leaf name.
 SHORT = {
     LUNA: "luna",
@@ -266,7 +266,7 @@ def summarize(entries, days, stats, log_path, backtest_path=None):
         model = entry.get("model") or "(none)"
         conf = entry.get("conf")
         served = entry.get("tier")
-        if model in (LUNA, SOL, ASTRA):
+        if model in (LUNA, TERRA, SOL, ASTRA):
             natives += 1
         elif SHORT.get(model) == "tandem":
             dry += 1
@@ -286,7 +286,7 @@ def summarize(entries, days, stats, log_path, backtest_path=None):
         else:
             row["cost_units"] += unit
             real_units += unit
-            if model in (LUNA, SOL, ASTRA):
+            if model in (LUNA, TERRA, SOL, ASTRA):
                 native_units += unit
         gates[entry.get("gate") or "(none)"] = gates.get(entry.get("gate") or "(none)", 0) + 1
         tier_key = served if served is not None else "(none)"
@@ -448,7 +448,7 @@ def render_text(rep):
     if served["tandem_turns"]:
         lines += [f"Codex-dry tandem served {fmt(served['tandem_turns'])} turns "
                   f"({served['tandem_share_pct']}%) — native usage exhausted, "
-                  f"the triptych was replaced (see the gates below)"]
+                  f"the native four-tier set was replaced (see the gates below)"]
 
     lines += ["", "Gates",
               table(["gate", "turns", "share"],
