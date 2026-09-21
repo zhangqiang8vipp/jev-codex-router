@@ -114,7 +114,7 @@ ROUTER = ("127.0.0.1", _port_from_env(
     "MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", default=4202))
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.6"
+VERSION = "1.7"
 VIRTUAL_MODEL_ID = "auto"
 VIRTUAL_MODEL_SLUG = "jev/auto"
 VIRTUAL_CONTEXT_WINDOW = 1_050_000
