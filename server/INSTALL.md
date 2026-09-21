@@ -12,6 +12,7 @@ shared ChatGPT session.
 |---|---|
 | Decision log | `tail -f ~/.codex/codex-router/jev-router-live.jsonl` |
 | Kill switch (no Jev → frontier) | `touch ~/.codex/codex-router/jev-router.off` / `rm` to re-enable |
+| Readiness check | `python3 server/jev_server.py --check` |
 | Install the launchd service | `bash server/install-service.sh` (in your own Terminal) |
 | Service status | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` |
 | Service restart | `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
@@ -19,6 +20,25 @@ shared ChatGPT session.
 | Hide the model | `./bin/control picker set jev/auto hide` (router checkout) |
 | Disable the provider | `./bin/codex-router providers generic disable jev` |
 | Revoke native sharing | `./bin/codex-router chatgpt-session disable` |
+
+## Key setup
+
+For a persistent macOS service, store the TypeSafe key in a file because launchd
+does not inherit an interactive shell's `TYPESAFE_API_KEY`:
+
+```bash
+mkdir -p ~/.hermes
+printf '%s\n' 'TYPESAFE_API_KEY=YOUR_KEY' > ~/.hermes/.env
+chmod 600 ~/.hermes/.env
+```
+
+To use another file, set `JEV_ENV_FILE=/path/to/env` when running
+`server/install-service.sh`; the installer persists only that path in the
+launchd plist, never the key itself.
+
+Run `python3 server/jev_server.py --check` at any time. It checks the key,
+TypeSafe API reachability, the protected Codex Router caller secret, and the
+router on port 4202 without printing either credential.
 
 ## After a Codex Router update
 
@@ -28,7 +48,8 @@ touch them. Verify anyway:
 1. `./bin/codex-router providers generic list` → should show `SHOW jev`.
 2. `cat ~/.codex/codex-router/model-picker.json` → `jev/auto` under `visible`.
 3. `curl -s http://127.0.0.1:4319/health` → `{"ok": true...}`.
-4. If needed: `./bin/codex-router refresh-catalog`, then restart Codex.
+4. `python3 server/jev_server.py --check` → all four checks should be `OK`.
+5. If needed: `./bin/codex-router refresh-catalog`, then restart Codex.
 
 ## Troubleshooting
 
