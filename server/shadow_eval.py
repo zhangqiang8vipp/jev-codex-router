@@ -16,7 +16,7 @@ import os
 import threading
 import uuid
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 USAGE_FIELDS = (
     "input_tokens",
     "cached_input_tokens",
@@ -136,6 +136,9 @@ def build_turn_event(
     total_ms,
     jev_ms,
     step_type,
+    route_source=None,
+    route_reason=None,
+    jev_cache=None,
     dry_reason=None,
     fallback=None,
 ):
@@ -168,7 +171,10 @@ def build_turn_event(
         **cache,
         "total_ms": total_ms,
         "jev_ms": jev_ms,
+        "jev_cache": jev_cache,
         "step_type": step_type,
+        "route_source": route_source,
+        "route_reason": route_reason,
         "dry": dry_reason,
         "fallback": fallback,
         "attempts": normalized_attempts(attempts),
