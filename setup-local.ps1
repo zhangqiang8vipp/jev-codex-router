@@ -85,6 +85,30 @@ function Get-GenericProviders {
   }
 }
 
+function Wait-JevProviderDiscovery([int]$Attempts = 6) {
+  for ($i = 0; $i -lt $Attempts; $i++) {
+    if (Test-ModelRouter @("codex", "providers", "generic", "test", "jev")) {
+      return $true
+    }
+
+    # A repeated install can briefly race the previous scheduled-task process.
+    # Make sure the task is running and the local catalog is actually reachable
+    # before asking Codex Router again.
+    try {
+      $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:4319/v1/models" -TimeoutSec 2
+      if (@($catalog.data | Where-Object { $_.id -eq "auto" }).Count -gt 0) {
+        $task = Get-ScheduledTask -TaskName "Jev Codex Router" -ErrorAction SilentlyContinue
+        if ($task -and $task.State -ne "Running") {
+          Start-ScheduledTask -TaskName "Jev Codex Router" -ErrorAction SilentlyContinue
+        }
+      }
+    } catch {}
+
+    Start-Sleep -Seconds 1
+  }
+  return $false
+}
+
 $RepoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $RouterDir = Resolve-RouterDir $RouterDir
 $script:ModelRouter = Join-Path $RouterDir "model-router.ps1"
@@ -182,7 +206,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "== 5/10  Provider discovery =="
-Invoke-ModelRouter @("codex", "providers", "generic", "test", "jev")
+if (-not (Wait-JevProviderDiscovery 6)) {
+  $catalogOk = $false
+  try {
+    $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:4319/v1/models" -TimeoutSec 3
+    $catalogOk = @($catalog.data | Where-Object { $_.id -eq "auto" }).Count -gt 0
+  } catch {}
+  if ($catalogOk) {
+    throw "Jev /v1/models is healthy, but Codex Router could not reach the generic provider after retries."
+  }
+  throw "Jev provider discovery failed because the local /v1/models endpoint is not staying reachable."
+}
+Write-Host "Jev provider discovery is reachable."
 
 Write-Host "== 6/10  Curate jev/auto =="
 & node.exe $curate jev --models auto --efforts low,medium,high,xhigh,max --apply
