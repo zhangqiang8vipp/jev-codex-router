@@ -97,7 +97,20 @@ def is_short_followup(task: str) -> bool:
     return bool(compact) and len(compact) <= SHORT_FOLLOWUP_CHARS and len(compact.split()) <= 10
 
 
-def _stable_explicit_id(payload: Dict[str, Any]) -> Optional[str]:
+def _stable_explicit_id(
+    payload: Dict[str, Any],
+    headers: Optional[Any] = None,
+) -> Optional[str]:
+    if headers is not None:
+        try:
+            header_map = {str(k).lower(): v for k, v in headers.items()}
+        except (AttributeError, TypeError, ValueError):
+            header_map = {}
+        for key in ("thread-id", "session-id", "session_id"):
+            value = header_map.get(key)
+            if isinstance(value, str) and value:
+                return f"header.{key}:{value}"
+
     for key in ("conversation_id", "thread_id", "session_id"):
         value = payload.get(key)
         if isinstance(value, str) and value:
@@ -118,9 +131,17 @@ def _stable_explicit_id(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def session_key(payload: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
-    """Best-effort stable thread key, always returned as a one-way hash."""
-    basis = _stable_explicit_id(payload)
+def session_key(
+    payload: Dict[str, Any],
+    cwd: Optional[str] = None,
+    headers: Optional[Any] = None,
+) -> Optional[str]:
+    """Best-effort stable thread key, always returned as a one-way hash.
+
+    Prefer explicit conversation/session identifiers, including the protected
+    caller headers Codex Router preserves. Raw identifiers are never persisted.
+    """
+    basis = _stable_explicit_id(payload, headers)
     inp = payload.get("input")
     if basis is None and isinstance(inp, list):
         for item in inp:
