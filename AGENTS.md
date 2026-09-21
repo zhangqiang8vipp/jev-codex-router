@@ -1,221 +1,245 @@
-# AGENTS.md — autonomous install & operations playbook
+# AGENTS.md — install, verify, and operate Jev Codex Router
 
-This file lets a coding agent (Codex, Claude Code, Cursor, …) install, verify
-and operate the **Jev Codex Router** on a user's machine without asking for
-context it can discover itself. Follow it top to bottom. Do not skip the
-verification step after each stage — they are what makes autonomy safe here.
+This file is for coding agents installing or maintaining this repository on a
+user's machine. Discover what you can locally. Never ask the user to paste a
+secret into chat.
 
-## What you are installing
+## What this project does
 
-A local server plus a Codex Router extension that adds one model to the Codex
-picker — **"Jev Codex Router"** (`jev/auto`). Every turn sent to it is classified by
-[Jev](https://docs.typesafe.ai) (TypeSafe System One) and served by the
-cheapest model that can handle it, at a thinking depth adapted to the task.
-All traffic stays on loopback; the design is fail-open; there is a kill switch.
+`jev/auto` is a local Codex model backed by Jev (TypeSafe System One). Jev
+chooses one of 20 model/effort pairs:
 
-## Hard rules (never violate)
+- Luna / Terra / Sol / Astra
+- low / medium / high / xhigh / max
 
-1. **Never print, log, commit, or transmit secrets** — the TypeSafe API key,
-   the router `caller-secret`, or ChatGPT tokens. Reference them by file path.
-2. **Edit the source, never the artifact.** `<router checkout>/src/` is the
-   router's own source and is meant to be edited: a behaviour bug is fixed
-   there, committed on the checkout's branch, with the tests that cover it.
-   What is off limits is the *generated and managed* output — `litellm.yaml`
-   under the router's state directory is rendered from `src/litellm-config.mjs`
-   whenever the catalog changes, and the `codex-router-managed` blocks of
-   `~/.codex/config.toml` are written by the CLI, so a hand edit there is
-   overwritten rather than applied. Change the generator, or drive the CLI and
-   the documented state files (`user-models.json`, `generic-providers.json`),
-   and leave the artifacts to be regenerated.
-3. The server binds `127.0.0.1` only. Never expose it on another interface.
-4. If `launchctl` is restricted in your environment (supervised agents often),
-   skip the service install — use the watchdog pattern and let the user run
-   `server/install-service.sh` from their own Terminal instead. Never fight
-   the restriction.
-5. Treat prompt excerpts in local logs (`jev-router-live.jsonl`,
-   `shadow-log.jsonl`) as private user data: read locally, never republish.
+Local smart guardrails may raise or hold that route after observed tool
+failures or across short continuations. The request is executed once.
 
-## Prerequisites (check, and report what you found)
+Production Shadow Eval records the raw Jev route, smart route, actually served
+route, numeric usage/cache counters, latency, retries, terminal outcome and
+next-turn tool success/error. It never replays a second model route.
 
-- **macOS** with **Codex** and a **Codex Router installation** (the local router
-  that serves native GPT models to Codex on `127.0.0.1:4202`).
-  Check: `<router checkout>/bin/codex-router status` → expect
-  `{"state":"running"}`; `./bin/codex-router providers generic list` must exist.
-- **Python ≥ 3.11** — `python3 -V`.
-- A **TypeSafe API key** for Jev. The server looks for `TYPESAFE_API_KEY` in
-  `~/.hermes/.env` first, then `~/.jev.env`, then the process environment.
-  If none exists, **stop and ask the user where their key file is — never ask
-  for the key value itself in chat.**
+## Hard rules
 
-## Install, step by step
+1. Never print, log, commit, or transmit the TypeSafe API key, Codex Router
+   `caller-secret`, ChatGPT tokens, or raw credentials.
+2. Keep the Jev server bound to `127.0.0.1`.
+3. Do not hand-edit generated Codex Router artifacts. Use the current
+   `model-router` / generic-provider / curation interfaces.
+4. Treat `jev-router-live.jsonl` as private because it contains a short task
+   excerpt. Shadow Eval is intentionally privacy-reduced but is still local
+   telemetry; do not republish it without permission.
+5. Do not dual-execute counterfactual routes in production. Tool calls can have
+   side effects. Counterfactual quality is unknown.
+6. TypeSafe probabilities/confidence are diagnostic evidence, not proof of
+   correctness. Keep deterministic policy and exact calculations in code.
 
-### 1 — Start the server
+## Prerequisites
+
+Common:
+
+- Codex Desktop or CLI signed in with ChatGPT.
+- Current Codex Router checkout.
+- Python 3.11+.
+- Node.js required by Codex Router.
+- TypeSafe key stored in `~/.hermes/.env` or a file named by
+  `JEV_ENV_FILE`. Ask for the file path if missing, never the value.
+
+Windows is first-class. Codex Router's current Windows entrypoint is
+`model-router.ps1`; do not substitute old `bin/codex-router` commands.
+
+## Preferred install
+
+### Windows
+
+From this repository:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
+  -RouterDir "C:\absolute\path\to\codex-router"
+```
+
+The script must complete all of these stages:
+
+1. Codex Router status + doctor.
+2. Shared ChatGPT session authorization.
+3. `jev` generic provider on `http://127.0.0.1:4319/v1`, adapter
+   `openai-responses`, private-loopback explicitly allowed.
+4. `Jev Codex Router` hidden Scheduled Task plus one-minute heartbeat.
+5. `Jev Codex Router Shadow Eval` daily Scheduled Task.
+6. Generic provider live test.
+7. Curation of `jev/auto` with
+   `low,medium,high,xhigh,max` and apply/restart.
+8. `py -3 server\jev_server.py --check` with all checks OK.
+
+Windows background tasks are installed by
+`server/install-service.ps1` and removed by
+`server/uninstall-service.ps1`.
+
+### macOS
 
 ```bash
-cd <repo>
-python3 server/jev_server.py &            # long-lived; launchd service in step 6
-curl -s http://127.0.0.1:4319/health      # expect: {"ok": true, "service": "jev-router"}
-curl -s http://127.0.0.1:4319/v1/models   # expect: one model, id "auto"
+bash setup-local.sh /absolute/path/to/codex-router
 ```
 
-### 2 — Declare the model
+The macOS launchd flow remains supported.
 
-Create `~/.codex/codex-router/user-models.json` (hand-editable state file; if
-it already has `models`, append to the array instead of overwriting):
+## Manual Windows wiring
 
-```json
-{
-  "version": 1,
-  "models": [
-    {
-      "slug": "jev/auto",
-      "gatewayModel": "jev-auto",
-      "compHash": "jev-auto-user-v1",
-      "upstreamModel": "auto",
-      "provider": "jev",
-      "listed": true,
-      "displayName": "Jev Codex Router",
-      "description": "Auto-routing by Jev (TypeSafe): every turn is classified and served by luna, sol or astra at the thinking depth it needs.",
-      "priority": 95,
-      "defaultEffort": "medium",
-      "reasoningLevels": [
-        {"effort": "low", "description": "Quick reasoning"},
-        {"effort": "medium", "description": "Balanced reasoning"},
-        {"effort": "high", "description": "Deep reasoning"},
-        {"effort": "xhigh", "description": "Extended reasoning"},
-        {"effort": "max", "description": "Maximum reasoning"}
-      ],
-      "contextWindow": 258400,
-      "autoCompact": 219640,
-      "inputModalities": ["text", "image"]
-    }
-  ]
-}
+Use the Codex Router wrapper from its checkout:
+
+```powershell
+.\model-router.ps1 codex chatgpt-session enable
+
+.\model-router.ps1 codex providers generic add jev \
+  --name "Jev Router" \
+  --base-url http://127.0.0.1:4319/v1 \
+  --adapter openai-responses \
+  --allow-private
 ```
 
-### 3 — Register the generic provider (router CLI)
+If the provider exists, use `generic edit jev` with the same options.
 
-```bash
-cd <router checkout>
-./bin/codex-router providers generic add jev --name "Jev Router" \
-  --base-url http://127.0.0.1:4319/v1 --adapter openai-responses --allow-private
-./bin/codex-router providers generic list
-# expect:  SHOW jev   Jev Router (openai-responses)
+Install the Jev service:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\server\install-service.ps1
 ```
 
-### 4 — Share native ChatGPT access with local clients
+Curate using Codex Router's current curation source:
 
-```bash
-./bin/codex-router chatgpt-session enable
-# expect: "enabled for this user's local Codex Router clients (session valid
-# for about NNNh)". Re-run this when native calls later return Unauthorized.
+```powershell
+node C:\path\to\codex-router\src\curate-models.mjs jev \
+  --models auto \
+  --efforts low,medium,high,xhigh,max \
+  --apply
 ```
 
-### 5 — Publish and show
+Then:
 
-```bash
-./bin/codex-router refresh-catalog        # merged catalog must now contain "jev/auto"
-./bin/control picker set jev/auto show    # returns the picker JSON with jev/auto visible
+```powershell
+py -3 server\jev_server.py --check
 ```
 
-### 6 — Persistent service (optional)
+Do not hand-author `user-models.json` for normal installation.
 
-Ask the user to run, in **their own Terminal**:
+## Verification
 
-```bash
-bash <repo>/server/install-service.sh     # launchd service, keep-alive, logs in ~/Library/Logs
+The full readiness check verifies:
+
+- TypeSafe key is configured.
+- TypeSafe API is reachable.
+- protected Codex Router caller capability exists.
+- Codex Router is healthy.
+- authenticated router catalog actually contains `jev/auto`.
+
+The health-only endpoint is not enough to claim end-to-end readiness.
+
+## Shadow Eval
+
+Raw eval events:
+
+```text
+~/.codex/codex-router/jev-shadow-eval.jsonl
 ```
 
-Alternative (any scheduler, every 5 min): `<repo>/server/watchdog.sh` —
-silent when healthy, restarts the server when down.
+Each production turn records:
 
-### 7 — Restart Codex
+- raw Jev model + effort;
+- smart model + effort after local guardrails;
+- actually served model + effort after operational fallback;
+- Responses terminal outcome and HTTP status;
+- upstream attempt count and retry count;
+- numeric input/output/cached/cache-write/reasoning counters when available;
+- Jev and total latency;
+- hashed/bounded session identity;
+- next-turn tool-result success/error when available.
 
-Fully quit and reopen the Codex app so it reloads the picker catalog, then the
-user can select **Jev Codex Router**.
+It does **not** copy prompt text, tool arguments, command output, or response
+bodies.
 
-## End-to-end verification (must pass before declaring success)
+Manual rolling report:
 
-```bash
-SEC=$(cat ~/.codex/codex-router/caller-secret | tr -d '\n')
-curl -s -N -m 120 -X POST "http://127.0.0.1:4202/_codex-router/$SEC/v1/responses" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"jev/auto","input":[{"role":"user","content":[{"type":"input_text","text":"Say OK"}]}],"stream":true}' | head -c 400
+```powershell
+py -3 server\report_shadow_eval.py --days 7 --write
 ```
 
-Expect an SSE stream: `data: {"type":"response.created",...,"model":"gpt-5.6-luna",…`
-(a trivial prompt routes to luna) ending with `response.completed` and
-`data: [DONE]`. Then:
+Outputs:
 
-```bash
-tail -1 ~/.codex/codex-router/jev-router-live.jsonl
-# expect one JSON line: gate=apply, tier, conf, depth, model, effort, speed,
-# jev_ms, total_ms, status=200, out=sse
-```
+- `jev-shadow-eval-7d.txt`
+- `jev-shadow-eval-7d.json`
+
+The Windows Scheduled Task refreshes them daily at 03:15 and uses
+`StartWhenAvailable`.
+
+Interpret the report carefully:
+
+- `observed_success_rate` is an operational proxy for the smart route that
+  actually ran.
+- raw Jev route cost may be estimated using the same observed token volume.
+- raw Jev route quality is never estimated.
+- the pair Pareto frontier is selection-biased because task mix differs by
+  route. It identifies calibration candidates, not causal winners.
 
 ## Operations
 
-- **Decision log**: `~/.codex/codex-router/jev-router-live.jsonl` — one line per
-  routed turn.
-- **Ask surface**: `POST /ask` (also `/v1/ask`) — typed pass-through to System
-  One for local callers with their own question set (state ≤ 120k chars, ≤ 40
-  questions, caller state never logged). `502 jev: HTTP Error 402` means the
-  TypeSafe account is out of credits; `503` means no key was found.
-- **Kill switch** (instant, no restart): `touch ~/.codex/codex-router/jev-router.off`
-  → the server relays to astra without calling Jev. Remove the file to re-enable.
-- **Codex-dry tandem** (only while native usage is exhausted):
-  `touch ~/.codex/codex-router/jev-router.codex-dry` → frontier-tier calls go to
-  `opencode-go/glm-5.3-flash`, every other tier to
-  `opencode-go/deepseek-v4.1-flash`; remove the file to return to the
-  luna/sol/astra triptych. An automatic flip (429 / usage-limit response) also
-  retries the failed call on the tandem, then lasts until the instant the edge
-  announced for the window reset (30 minutes when the refusal announces none,
-  one week at most) — `cat ~/.codex/codex-router/jev-router.codex-dry.json`
-  reads the reason and `until_iso` — and is cleared by the next successful
-  native call. Log fields to watch: `dry`, `native`, `retried`.
-- **Thread display**: streamed reasoning summaries get the routed tag appended
-  in place ( · 🧠sol:low · , separators on both sides so the next summary part
-  never glues to the tag; one glyph per route — ⚡luna, 🧠sol, 🚀astra,
-  🐳deepseek/✨glm in tandem) — the picked model shows inside each call's thinking
-  block in the Codex thread.
-- **Shadow mode**: `touch ~/.codex/codex-router/jev-router.shadow` → decisions
-  are logged (`would` field) while every call is still served by astra.
-- **Debug capture** (bounded): `touch ~/.codex/codex-router/jev-router.debug`
-  → request shapes in `jev-router-debug.jsonl` and raw response streams in
-  `jev-router-debug-stream.log`. Remove the file to stop.
-- **Tune the policy**: the shared contract in `server/routing_policy.py`. Keep decisions
-  joint and evidence-based; restart the server after edits.
-- **Backtest**: `python3 poc/backtest_savings.py --days 7` (see BACKTEST.md).
-- **Disable**: `./bin/codex-router providers generic disable jev` (keeps state);
-  full rollback: also `./bin/codex-router chatgpt-session disable` and stop the
-  service (`launchctl bootout gui/$(id -u)/com.thibaultsaintjean.jev-router`).
+Windows examples:
 
-## Troubleshooting
+```powershell
+Get-ScheduledTask -TaskName "Jev Codex Router"
+Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"
+Get-Content "$HOME\.codex\codex-router\jev-router-live.jsonl" -Wait
+Get-Content "$HOME\.codex\codex-router\jev-shadow-eval.jsonl" -Wait
+Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"
+```
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| `{"detail":"Unauthorized"}` from the caller edge | native sharing off | `./bin/codex-router chatgpt-session enable` |
-| `{"detail":"Stream must be set to true"}` | the caller edge streams only | send `"stream": true`; the bundled server forces it |
-| HTTP 502 `provider_api_proxy_error` on jev-auto | server-side error | check the `status`/`out` fields in `jev-router-live.jsonl`, and the server's stderr log |
-| "Jev Codex Router" absent from the picker | not published/visible, or Codex not restarted | `refresh-catalog`, `control picker set jev/auto show`, full Codex restart |
-| Native 429 / "usage limit" while routing | ChatGPT usage window exhausted | expected: the Codex-dry tandem takes over (`jev-router.codex-dry.json`); delete the manual file to re-probe sooner |
-| Jev calls fail with `402 Payment Required` (`gate=codex_dry(fallback)`, `tier` null in the log) | the TypeSafe account is out of credits | expected: the router keeps serving through the tandem; add credits at console.typesafe.ai to restore classification |
-| `Unknown API gateway model: jev-auto` | catalog not republished | `./bin/codex-router refresh-catalog` |
-| Jev returns HTTP 422 | request body missing `"model"` | always send `"model": "jev-latest"` to the System One API |
-| Native calls fail after a few days | shared session expired | re-run `chatgpt-session enable` |
-| `launchctl` rejected inside a supervised agent | environment restriction | use the watchdog; let the user run `install-service.sh` |
+Sentinel files are platform-independent in the router state directory:
 
-## Latency & cost notes
+- `jev-router.off`: skip Jev and use frontier fail-open.
+- `jev-router.shadow`: legacy serve-Astra shadow mode.
+- `jev-router.debug`: bounded debug capture.
+- `jev-router.signature`: show route signature in assistant text.
+- `jev-router.codex-dry`: manual native-quota fallback.
 
-- The current policy is `joint-v1-standard`: Jev chooses one of 15 model/effort
-  pairs per call. All tiers use adaptive effort and standard speed; never force
-  Luna to max or enable Fast mode.
-- No scenario overrides, target model shares, or confidence threshold may
-  replace a valid Jev choice with Sol, Luna or Astra. Confidence is diagnostic.
-- Provider/schema failures remain distinct: Astra at medium, logged as a
-  technical fallback. Kill switch and exhausted-native-quota handling still apply.
-- Jev usage and upstream per-attempt tokens are logged when available. Run
-  `python3 server/report_routing.py --days 7` for native-only credit estimates;
-  unknown usage remains unknown and reasoning tokens are not counted twice.
-- `BACKTEST.md` documents the old policy's fixed-token simulation. It is not a
-  measurement of current quota savings or result quality.
+Production Shadow Eval is always passive and does not require
+`jev-router.shadow`.
+
+## Tuning policy
+
+Do not add routing heuristics just because one 7-day aggregate looks cheaper.
+Before changing `server/routing_policy.py` or `server/smart_context.py`:
+
+1. inspect sample counts per pair;
+2. inspect route-change transitions;
+3. inspect tool-error and retry rates;
+4. inspect cache-hit ratio and latency;
+5. separate operational fallback/dry turns;
+6. identify pairs on the observed Pareto frontier;
+7. make one bounded policy change;
+8. bump `POLICY_VERSION`;
+9. collect a fresh window.
+
+Keep raw Jev judgments in telemetry so thresholds and policy composition can be
+reanalyzed without rerunning inference.
+
+## Tests
+
+Run:
+
+```text
+python -m compileall -q server poc
+python -m unittest discover -s server -p "test_*.py" -v
+```
+
+On Windows also parse every `.ps1` file with PowerShell's language parser.
+CI contains a `windows-syntax` job for this.
+
+## Current known limitations
+
+- Shadow Eval measures operational success, not semantic task correctness.
+- Counterfactual quality requires a controlled eval dataset or safe replay, not
+  live dual execution.
+- ChatGPT credit figures are published-rate estimates, not observed account
+  debits.
+- Model-pair comparisons are observational because the router chooses which
+  tasks each pair sees.
