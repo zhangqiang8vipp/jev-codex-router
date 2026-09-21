@@ -115,8 +115,6 @@ if ($discovery -ne "enabled") {
   }
 }
 
-Invoke-ModelRouter @("codex", "doctor")
-
 Write-Host "== 2/10  Codex ChatGPT session =="
 $codex = Get-Command codex.exe -ErrorAction SilentlyContinue
 if ($codex) {
