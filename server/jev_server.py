@@ -596,6 +596,17 @@ def breaker_available(model):
         return True
 
 
+def breaker_release(model):
+    """Release a claimed half-open probe without changing circuit health."""
+    with _BREAKER_LOCK:
+        entry = _BREAKER.get(model)
+        if entry is None:
+            return
+        count, first_ts, open_until, probe_in_flight = _breaker_unpack(entry)
+        if probe_in_flight:
+            _BREAKER[model] = (count, first_ts, open_until, False)
+
+
 def breaker_pick(preferred_model):
     """Claim preferred or the next available *higher* tier; never wrap downward."""
     if preferred_model not in TIERS:
@@ -1555,6 +1566,7 @@ class Handler(BaseHTTPRequestHandler):
                             payload, out_path, stream_requested, debug, marker,
                             attempt_model, signature, deadline=escalation_deadline)
                     except (BrokenPipeError, ConnectionResetError, ResponseCommittedError):
+                        breaker_release(attempt_model)
                         raise
                     except (http.client.HTTPException, ConnectionError, OSError) as exc:
                         status = 504 if time.monotonic() >= escalation_deadline else 502
@@ -1566,7 +1578,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Terminal subscription exhaustion is carried to Codex as a
                 # response.failed SSE. It is handled, not a healthy upstream
                 # success and not a reason to probe another tier.
-                if not quota_hit:
+                if quota_hit:
+                    breaker_release(attempt_model)
+                else:
                     breaker_record(attempt_model, status == 200)
                 if status == 200:
                     break
@@ -1604,7 +1618,9 @@ class Handler(BaseHTTPRequestHandler):
                 with native_redirect_suppressed():
                     status, out_kind, ctype, quota_hit, _u, _r, error_bytes = self._forward(
                         payload, out_path, stream_requested, debug, marker, model, signature)
-                if not quota_hit:
+                if quota_hit:
+                    breaker_release(model)
+                else:
                     breaker_record(model, status == 200)
 
         retried = False
