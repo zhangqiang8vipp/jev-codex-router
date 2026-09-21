@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation;
@@ -9,154 +8,194 @@ internal sealed record CodexAnchor(IntPtr WindowHandle, int ProcessId, Rect Boun
 
 internal sealed class CodexUiTracker
 {
-    private static readonly TimeSpan ProcessCacheLifetime = TimeSpan.FromSeconds(2);
-    private HashSet<int> _cachedProcessIds = new();
-    private DateTimeOffset _processCacheAt = DateTimeOffset.MinValue;
+    // These labels identify the native reasoning selector itself, rather than a
+    // selected effort value. They are safe to trust on the foreground window
+    // without guessing the packaged app's process name.
+    private static readonly string[] StrongAnchorNames =
+    [
+        "选择强度",
+        "Select reasoning",
+        "Reasoning effort",
+        "Choose reasoning"
+    ];
 
     private static readonly string[] ChineseEffortNames =
     [
-        "选择强度", "轻度", "中等", "高", "极高", "最高"
+        "轻度", "中等", "高", "极高", "最高"
     ];
 
     private static readonly string[] EnglishEffortNames =
     [
-        "select reasoning", "reasoning effort", "low", "medium", "high",
-        "extra high", "xhigh", "max", "ultra"
+        "low", "medium", "high", "extra high", "xhigh", "max", "ultra"
     ];
 
     public CodexAnchor? TryFindReasoningAnchor()
     {
-        var processIds = FindCodexProcessIds();
-        if (processIds.Count == 0) return null;
+        var foreground = NativeWindowStyles.GetForegroundWindow();
+        if (foreground == IntPtr.Zero)
+            return null;
 
         try
         {
-            var desktop = AutomationElement.RootElement;
-            var windows = desktop.FindAll(
-                TreeScope.Children,
-                System.Windows.Automation.Condition.TrueCondition);
+            var window = AutomationElement.FromHandle(foreground);
+            if (window is null || window.Current.IsOffscreen)
+                return null;
 
-            CodexAnchor? best = null;
-            double bestScore = double.MinValue;
+            var windowBounds = window.Current.BoundingRectangle;
+            if (windowBounds.IsEmpty || windowBounds.Width < 500 || windowBounds.Height < 350)
+                return null;
 
-            foreach (AutomationElement window in windows)
-            {
-                try
-                {
-                    if (!processIds.Contains(window.Current.ProcessId) || window.Current.IsOffscreen)
-                        continue;
+            // First prefer the selector's own localized name. This survives
+            // packaged-process renames and WebView host process changes.
+            var strong = FindStrongAnchors(window);
+            var best = PickBest(window, foreground, windowBounds, strong, requireCodexEvidence: false);
+            if (best is not null)
+                return best;
 
-                    var windowBounds = window.Current.BoundingRectangle;
-                    if (windowBounds.IsEmpty || windowBounds.Width < 500 || windowBounds.Height < 350)
-                        continue;
+            // Some builds expose only the selected value (e.g. Ultra/High).
+            // Keep this fallback conservative by requiring Codex-like window
+            // evidence before accepting a generic effort word.
+            if (!LooksLikeCodexWindow(window))
+                return null;
 
-                    var controls = window.FindAll(
-                        TreeScope.Descendants,
-                        new System.Windows.Automation.OrCondition(
-                            new PropertyCondition(
-                                AutomationElement.ControlTypeProperty,
-                                ControlType.Button),
-                            new PropertyCondition(
-                                AutomationElement.ControlTypeProperty,
-                                ControlType.ComboBox)));
-
-                    foreach (AutomationElement button in controls)
-                    {
-                        try
-                        {
-                            if (button.Current.IsOffscreen || !button.Current.IsEnabled) continue;
-                            var label = (button.Current.Name ?? string.Empty).Trim();
-                            if (!LooksLikeReasoningControl(label)) continue;
-
-                            var bounds = button.Current.BoundingRectangle;
-                            if (bounds.IsEmpty || bounds.Width < 36 || bounds.Height < 18) continue;
-
-                            // The composer controls live low and toward the right.  This
-                            // intentionally prefers geometry over any one localized label.
-                            var lower = bounds.Top >= windowBounds.Top + windowBounds.Height * 0.55;
-                            var right = bounds.Left >= windowBounds.Left + windowBounds.Width * 0.40;
-                            if (!lower || !right) continue;
-
-                            var bottomProximity = 1.0 - Math.Min(
-                                1.0,
-                                Math.Abs(windowBounds.Bottom - bounds.Bottom) / Math.Max(1.0, windowBounds.Height));
-                            var rightness = (bounds.Left - windowBounds.Left) / Math.Max(1.0, windowBounds.Width);
-                            var exactBonus = IsExactEffortLabel(label) ? 2.0 : 0.0;
-                            var score = exactBonus + bottomProximity + rightness;
-
-                            if (score <= bestScore) continue;
-                            bestScore = score;
-                            best = new CodexAnchor(
-                                window.Current.NativeWindowHandle == 0
-                                    ? IntPtr.Zero
-                                    : new IntPtr(window.Current.NativeWindowHandle),
-                                window.Current.ProcessId,
-                                bounds,
-                                label);
-                        }
-                        catch (ElementNotAvailableException) { }
-                        catch (COMException) { }
-                    }
-                }
-                catch (ElementNotAvailableException) { }
-                catch (COMException) { }
-            }
-
-            return best;
+            var fallback = FindEffortValueControls(window);
+            return PickBest(window, foreground, windowBounds, fallback, requireCodexEvidence: true);
         }
         catch (ElementNotAvailableException) { return null; }
         catch (COMException) { return null; }
+        catch (InvalidOperationException) { return null; }
     }
 
-    private HashSet<int> FindCodexProcessIds()
+    private static AutomationElementCollection FindStrongAnchors(AutomationElement window)
     {
-        if (DateTimeOffset.UtcNow - _processCacheAt < ProcessCacheLifetime)
-            return _cachedProcessIds;
+        var conditions = StrongAnchorNames
+            .Select(name => (System.Windows.Automation.Condition)
+                new PropertyCondition(AutomationElement.NameProperty, name))
+            .ToArray();
 
-        var ids = new HashSet<int>();
-        foreach (var processName in new[] { "Codex", "ChatGPT" })
+        return window.FindAll(
+            TreeScope.Descendants,
+            conditions.Length == 1
+                ? conditions[0]
+                : new System.Windows.Automation.OrCondition(conditions));
+    }
+
+    private static AutomationElementCollection FindEffortValueControls(AutomationElement window)
+    {
+        return window.FindAll(
+            TreeScope.Descendants,
+            new System.Windows.Automation.OrCondition(
+                new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.Button),
+                new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.ComboBox),
+                new PropertyCondition(
+                    AutomationElement.ControlTypeProperty,
+                    ControlType.Custom)));
+    }
+
+    private static CodexAnchor? PickBest(
+        AutomationElement window,
+        IntPtr foreground,
+        Rect windowBounds,
+        AutomationElementCollection candidates,
+        bool requireCodexEvidence)
+    {
+        CodexAnchor? best = null;
+        double bestScore = double.MinValue;
+
+        foreach (AutomationElement candidate in candidates)
         {
-            foreach (var process in Process.GetProcessesByName(processName))
+            try
             {
-                using (process)
-                {
-                    try
-                    {
-                        if (processName.Equals("ChatGPT", StringComparison.OrdinalIgnoreCase))
-                        {
-                            string? path = null;
-                            try { path = process.MainModule?.FileName; } catch { }
-                            if (!string.IsNullOrWhiteSpace(path)
-                                && !path.Contains("OpenAI.Codex", StringComparison.OrdinalIgnoreCase))
-                            {
-                                continue;
-                            }
-                        }
+                if (candidate.Current.IsOffscreen || !candidate.Current.IsEnabled)
+                    continue;
 
-                        ids.Add(process.Id);
-                    }
-                    catch (InvalidOperationException) { }
-                }
+                var label = (candidate.Current.Name ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(label))
+                    continue;
+
+                if (requireCodexEvidence && !LooksLikeEffortValue(label))
+                    continue;
+
+                var bounds = candidate.Current.BoundingRectangle;
+                if (bounds.IsEmpty || bounds.Width < 36 || bounds.Height < 18)
+                    continue;
+
+                // The composer controls sit in the lower-right region of the
+                // foreground Codex window. This rejects menus/toolbars elsewhere.
+                var lower = bounds.Top >= windowBounds.Top + windowBounds.Height * 0.55;
+                var right = bounds.Left >= windowBounds.Left + windowBounds.Width * 0.40;
+                if (!lower || !right)
+                    continue;
+
+                var bottomProximity = 1.0 - Math.Min(
+                    1.0,
+                    Math.Abs(windowBounds.Bottom - bounds.Bottom) / Math.Max(1.0, windowBounds.Height));
+                var rightness = (bounds.Left - windowBounds.Left) / Math.Max(1.0, windowBounds.Width);
+                var strongBonus = StrongAnchorNames.Any(
+                    name => label.Equals(name, StringComparison.OrdinalIgnoreCase)) ? 3.0 : 0.0;
+                var score = strongBonus + bottomProximity + rightness;
+
+                if (score <= bestScore)
+                    continue;
+
+                bestScore = score;
+                best = new CodexAnchor(
+                    foreground,
+                    window.Current.ProcessId,
+                    bounds,
+                    label);
             }
+            catch (ElementNotAvailableException) { }
+            catch (COMException) { }
         }
-        _cachedProcessIds = ids;
-        _processCacheAt = DateTimeOffset.UtcNow;
-        return ids;
+
+        return best;
     }
 
-    private static bool LooksLikeReasoningControl(string label)
+    private static bool LooksLikeCodexWindow(AutomationElement window)
     {
-        if (string.IsNullOrWhiteSpace(label)) return false;
-        var normalized = label.Trim().ToLowerInvariant();
-        if (ChineseEffortNames.Any(name => normalized.Contains(name, StringComparison.OrdinalIgnoreCase)))
+        string title;
+        try
+        {
+            title = (window.Current.Name ?? string.Empty).Trim();
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (title.Contains("Codex", StringComparison.OrdinalIgnoreCase))
             return true;
-        return EnglishEffortNames.Any(name => normalized.Contains(name, StringComparison.OrdinalIgnoreCase));
+
+        // Current Chinese builds expose distinctive composer labels even when
+        // the top-level packaged window title/process name is generic.
+        foreach (var evidence in new[] { "帮我批准", "随心输入" })
+        {
+            try
+            {
+                var node = window.FindFirst(
+                    TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.NameProperty, evidence));
+                if (node is not null)
+                    return true;
+            }
+            catch (ElementNotAvailableException) { }
+            catch (COMException) { }
+        }
+
+        return false;
     }
 
-    private static bool IsExactEffortLabel(string label)
+    private static bool LooksLikeEffortValue(string label)
     {
         var normalized = label.Trim().ToLowerInvariant();
-        return ChineseEffortNames.Any(name => normalized.Equals(name, StringComparison.OrdinalIgnoreCase))
-               || EnglishEffortNames.Any(name => normalized.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return ChineseEffortNames.Any(
+                   name => normalized.Equals(name, StringComparison.OrdinalIgnoreCase))
+               || EnglishEffortNames.Any(
+                   name => normalized.Equals(name, StringComparison.OrdinalIgnoreCase));
     }
 }
