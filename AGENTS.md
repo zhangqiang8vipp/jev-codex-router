@@ -37,6 +37,11 @@ next-turn tool success/error. It never replays a second model route.
    Auto is implemented only through Codex Router `native-redirect=jev/auto`.
 8. Auto OFF must restore the redirect that existed immediately before Auto was
    enabled. Never clear or overwrite a newer operator redirect.
+9. Concrete native tiers selected by Jev must re-enter Codex Router with its
+   authenticated `x-codex-router-exact-route: 1` probe. The managed install
+   applies a guarded one-line caller-edge patch so that exact probe bypasses
+   only `native-redirect` for that request. Keep file suppression only as the
+   compatibility fallback when that scoped hook is unavailable.
 
 ## Prerequisites
 
@@ -136,7 +141,9 @@ The full readiness check verifies:
 The health-only endpoint is not enough to claim end-to-end readiness.
 
 Auto control readiness additionally requires `CODEX_ROUTER_DIR` to point to the
-current Codex Router checkout. Verify:
+current Codex Router checkout. Managed installs should report
+`exact_native_route: true`; `false` means the server is using the legacy
+router-wide suppression fallback. Verify:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:4319/control/status
@@ -266,3 +273,8 @@ build `desktop/JevAutoToggle/JevAutoToggle.csproj` with .NET 8. CI contains a
   debits.
 - Model-pair comparisons are observational because the router chooses which
   tasks each pair sees.
+- Current upstream Codex Router does not make its exact-route probe bypass
+  `native-redirect`. The managed service therefore applies one guarded source
+  condition and arms it only after a successful router restart. If a future
+  upstream update changes that source shape, Jev falls back to the older
+  suppression path instead of guessing at a rewrite.
