@@ -11,8 +11,7 @@ shared ChatGPT session.
 ### Windows
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
-  -RouterDir "C:\absolute\path\to\codex-router"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 -RouterDir "C:\absolute\path\to\codex-router"
 ```
 
 The Windows installer registers three per-user Scheduled Tasks:
@@ -80,9 +79,7 @@ The local control API is:
 ```powershell
 Invoke-RestMethod http://127.0.0.1:4319/control/status
 
-Invoke-RestMethod http://127.0.0.1:4319/control/auto \
-  -Method Post -ContentType "application/json" \
-  -Body (@{ enabled = $true } | ConvertTo-Json -Compress)
+Invoke-RestMethod http://127.0.0.1:4319/control/auto -Method Post -ContentType "application/json" -Body (@{ enabled = $true } | ConvertTo-Json -Compress)
 ```
 
 ## Key setup
