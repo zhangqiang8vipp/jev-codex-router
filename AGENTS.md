@@ -60,8 +60,7 @@ Windows is first-class. Codex Router's current Windows entrypoint is
 From this repository:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
-  -RouterDir "C:\absolute\path\to\codex-router"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 -RouterDir "C:\absolute\path\to\codex-router"
 ```
 
 The script must complete all of these stages:
@@ -99,11 +98,7 @@ Use the Codex Router wrapper from its checkout:
 ```powershell
 .\model-router.ps1 codex chatgpt-session enable
 
-.\model-router.ps1 codex providers generic add jev \
-  --name "Jev Router" \
-  --base-url http://127.0.0.1:4319/v1 \
-  --adapter openai-responses \
-  --allow-private
+.\model-router.ps1 codex providers generic add jev --name "Jev Router" --base-url http://127.0.0.1:4319/v1 --adapter openai-responses --allow-private
 ```
 
 If the provider exists, use `generic edit jev` with the same options.
@@ -117,10 +112,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\server\install-service
 Curate using Codex Router's current curation source:
 
 ```powershell
-node C:\path\to\codex-router\src\curate-models.mjs jev \
-  --models auto \
-  --efforts low,medium,high,xhigh,max \
-  --apply
+node C:\path\to\codex-router\src\curate-models.mjs jev --models auto --efforts low,medium,high,xhigh,max --apply
 ```
 
 Then:
