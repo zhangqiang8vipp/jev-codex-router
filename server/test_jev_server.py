@@ -7,6 +7,8 @@ continuity, routing-policy decisions, and bounded Jev task construction.
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -132,6 +134,114 @@ class InstallationCheck(unittest.TestCase):
         response = self.FakeResponse(body)
         with self.assertRaisesRegex(ValueError, "too large"):
             jev.read_bounded_response(response, jev.MODEL_CATALOG_MAX_BYTES)
+
+
+class RouteDecisionCache(unittest.TestCase):
+    def setUp(self):
+        with jev._route_cache_lock:
+            jev._route_cache.clear()
+            jev._route_flights.clear()
+
+    def tearDown(self):
+        with jev._route_cache_lock:
+            jev._route_cache.clear()
+            jev._route_flights.clear()
+
+    def test_identical_retry_reuses_one_paid_judgement(self):
+        answer = {"answers": {"route": {"choice": "gpt-5.6-sol:high"}}}
+        with mock.patch.object(jev, "call_jev_routed", return_value=answer) as call:
+            first, first_mode = jev.call_jev_for_route("key", {"task": "x"}, b"same-request")
+            second, second_mode = jev.call_jev_for_route("key", {"task": "changed-session"}, b"same-request")
+        self.assertIs(first, answer)
+        self.assertIs(second, answer)
+        self.assertEqual((first_mode, second_mode), ("miss", "hit"))
+        self.assertEqual(call.call_count, 1)
+
+    def test_failed_judgement_is_not_cached_for_a_later_retry(self):
+        answer = {"answers": {"route": {"choice": "gpt-5.6-sol:high"}}}
+        with mock.patch.object(
+            jev, "call_jev_routed", side_effect=[RuntimeError("temporary"), answer]
+        ) as call:
+            with self.assertRaisesRegex(RuntimeError, "temporary"):
+                jev.call_jev_for_route("key", {"task": "x"}, b"same-request")
+            result, mode = jev.call_jev_for_route("key", {"task": "x"}, b"same-request")
+        self.assertIs(result, answer)
+        self.assertEqual(mode, "miss")
+        self.assertEqual(call.call_count, 2)
+
+    def test_concurrent_identical_retries_are_single_flighted(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        answer = {"answers": {"route": {"choice": "gpt-5.6-terra:medium"}}}
+
+        def paid_call(*_args, **_kwargs):
+            calls.append(1)
+            entered.set()
+            release.wait(2)
+            return answer
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(
+                    jev.call_jev_for_route("key", {"task": "x"}, b"same-concurrent-request")
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        with mock.patch.object(jev, "call_jev_routed", side_effect=paid_call):
+            first = threading.Thread(target=worker)
+            second = threading.Thread(target=worker)
+            first.start()
+            self.assertTrue(entered.wait(1))
+            second.start()
+            time.sleep(0.05)
+            release.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(errors)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual({mode for _result, mode in results}, {"miss", "coalesced"})
+
+
+class TerminalQuotaTranslation(unittest.TestCase):
+    def test_native_usage_limit_becomes_a_terminal_sse_quota_code(self):
+        body = json.dumps({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+                "plan_type": "pro",
+            }
+        }).encode()
+        error = jev.terminal_quota_error(429, {}, body)
+        self.assertEqual(error["code"], "insufficient_quota")
+        self.assertEqual(error["message"], "The usage limit has been reached")
+
+        wire = jev.quota_failure_sse(error).decode("utf-8")
+        payload = json.loads(next(
+            line[6:] for line in wire.splitlines() if line.startswith("data: ")
+        ))
+        self.assertEqual(payload["type"], "response.failed")
+        self.assertEqual(payload["response"]["error"]["code"], "insufficient_quota")
+
+    def test_transient_rate_limit_stays_retryable_http_429(self):
+        body = json.dumps({
+            "error": {
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded",
+                "message": "Please try again in 2s",
+            }
+        }).encode()
+        self.assertIsNone(jev.terminal_quota_error(429, {}, body))
+
+    def test_codex_hard_stop_header_is_terminal_even_with_sparse_body(self):
+        headers = {"x-codex-rate-limit-reached-type": "workspace_owner_credits_depleted"}
+        error = jev.terminal_quota_error(429, headers, b'{"error":{"message":"limit"}}')
+        self.assertEqual(error["code"], "insufficient_quota")
 
 
 class ResponseIdContinuity(unittest.TestCase):
