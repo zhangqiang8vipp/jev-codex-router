@@ -9,16 +9,20 @@ skip only the native redirect for this authenticated request, without moving the
 router-wide native-redirect state file.
 
 The patch is intentionally tiny, idempotent, and fail-closed: if the upstream
-source shape is no longer recognized, this script refuses to rewrite it.
+source shape is no longer recognized, this script refuses to rewrite it. A
+state marker is armed only after the Codex Router service successfully restarts
+on the patched source, so Jev never trusts a source edit that is not live yet.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +32,8 @@ PATCHED_CONDITION = "if (!registeredRoute && requestedModel && !exactRouteProbe)
 ORIGINAL_CONDITION = "if (!registeredRoute && requestedModel) {"
 EXACT_PROBE_DECLARATION = "const exactRouteProbe = exactRouteProbeRequested(request.headers);"
 REDIRECT_ANCHOR = "const redirect = MODEL_BY_SLUG.get(readNativeRedirect());"
+MARKER_NAME = "jev-exact-native-route.json"
+MARKER_VERSION = 1
 
 
 class PatchError(RuntimeError):
@@ -89,10 +95,11 @@ def patch_router_file(router_dir: Path) -> tuple[Path, bool]:
     if not changed:
         return router_path, False
 
-    # Preserve the checkout's existing newline bytes. The replacement changes
-    # only one condition and should not churn a large upstream source file.
+    # read_bytes/decode/encode preserves the checkout's existing newline bytes.
+    # The replacement changes only one condition and must not churn a large
+    # upstream source file.
     encoded = patched.encode("utf-8")
-    mode = router_path.stat().st_mode
+    mode = stat.S_IMODE(router_path.stat().st_mode)
     fd, tmp_name = tempfile.mkstemp(prefix=".jev-router-patch-", dir=str(router_path.parent))
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -107,6 +114,59 @@ def patch_router_file(router_dir: Path) -> tuple[Path, bool]:
         except FileNotFoundError:
             pass
     return router_path, True
+
+
+def source_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def marker_path(state_dir: Path) -> Path:
+    return state_dir / MARKER_NAME
+
+
+def marker_matches(state_dir: Path, router_path: Path, sha256: str) -> bool:
+    try:
+        value = json.loads(marker_path(state_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(value, dict)
+        and value.get("version") == MARKER_VERSION
+        and value.get("router") == str(router_path.resolve())
+        and value.get("router_sha256") == sha256
+    )
+
+
+def write_marker(state_dir: Path, router_path: Path, sha256: str) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = marker_path(state_dir)
+    payload = {
+        "version": MARKER_VERSION,
+        "router": str(router_path.resolve()),
+        "router_sha256": sha256,
+        "mode": "exact-route-probe-bypasses-native-redirect",
+    }
+    fd, tmp_name = tempfile.mkstemp(prefix=".jev-exact-route-", dir=str(state_dir))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, separators=(",", ":"))
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            os.chmod(tmp_name, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
 
 
 def restart_router(router_dir: Path) -> None:
@@ -125,32 +185,83 @@ def restart_router(router_dir: Path) -> None:
         raise PatchError(f"Codex Router service restart failed with status {result.returncode}.")
 
 
+def ensure_patch(router_dir: Path, state_dir: Path, restart: bool) -> dict:
+    router_path, changed = patch_router_file(router_dir)
+    sha256 = source_sha256(router_path)
+    armed = marker_matches(state_dir, router_path, sha256)
+    restarted = False
+
+    # A changed source or an unarmed pre-existing patch must be loaded by the
+    # running Node service before Jev is allowed to skip the legacy suppression.
+    if restart and (changed or not armed):
+        restart_router(router_dir)
+        write_marker(state_dir, router_path, sha256)
+        restarted = True
+        armed = True
+
+    return {
+        "ok": True,
+        "changed": changed,
+        "restarted": restarted,
+        "armed": armed,
+        "router": str(router_path),
+        "router_sha256": sha256,
+        "exact_native_route": armed,
+    }
+
+
+def check_patch(router_dir: Path, state_dir: Path) -> dict:
+    router_path = router_dir / "src" / "router.mjs"
+    if not router_path.is_file():
+        raise PatchError(f"Codex Router source not found: {router_path}")
+    raw = router_path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PatchError(f"Codex Router source is not UTF-8: {router_path}") from exc
+    supported = source_supports_exact_native_route(text)
+    sha256 = source_sha256(router_path)
+    armed = supported and marker_matches(state_dir, router_path, sha256)
+    return {
+        "ok": armed,
+        "changed": False,
+        "restarted": False,
+        "armed": armed,
+        "router": str(router_path),
+        "router_sha256": sha256,
+        "exact_native_route": armed,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--router-dir", required=True)
     parser.add_argument(
+        "--state-dir",
+        default=os.path.join(os.path.expanduser("~"), ".codex", "codex-router"),
+    )
+    parser.add_argument(
         "--restart",
         action="store_true",
-        help="restart Codex Router only when this invocation changed router.mjs",
+        help="restart Codex Router when the patch is new or not yet armed",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify the live-arm marker without modifying source",
     )
     args = parser.parse_args(argv)
 
     router_dir = Path(args.router_dir).expanduser().resolve()
+    state_dir = Path(args.state_dir).expanduser().resolve()
     try:
-        router_path, changed = patch_router_file(router_dir)
-        restarted = False
-        if changed and args.restart:
-            restart_router(router_dir)
-            restarted = True
-        result = {
-            "ok": True,
-            "changed": changed,
-            "restarted": restarted,
-            "router": str(router_path),
-            "exact_native_route": True,
-        }
+        if args.check:
+            result = check_patch(router_dir, state_dir)
+            print(json.dumps(result, separators=(",", ":")))
+            return 0 if result["ok"] else 1
+        result = ensure_patch(router_dir, state_dir, args.restart)
         print(json.dumps(result, separators=(",", ":")))
-        return 0
+        return 0 if result["exact_native_route"] else 1
     except PatchError as exc:
         print(
             json.dumps(
