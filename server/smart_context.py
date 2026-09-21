@@ -106,7 +106,7 @@ def _stable_explicit_id(
             header_map = {str(k).lower(): v for k, v in headers.items()}
         except (AttributeError, TypeError, ValueError):
             header_map = {}
-        for key in ("thread-id", "session-id", "session_id", "x-codex-parent-thread-id"):
+        for key in ("thread-id", "session-id", "session_id"):
             value = header_map.get(key)
             if isinstance(value, str) and value:
                 return f"header.{key}:{value}"
