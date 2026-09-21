@@ -15,7 +15,7 @@ internal sealed class CodexUiTracker
 
     private static readonly string[] ChineseEffortNames =
     [
-        "选择强度", "轻度", "中等", "中", "高", "极高", "最高"
+        "选择强度", "轻度", "中等", "高", "极高", "最高"
     ];
 
     private static readonly string[] EnglishEffortNames =
@@ -50,11 +50,17 @@ internal sealed class CodexUiTracker
                     if (windowBounds.IsEmpty || windowBounds.Width < 500 || windowBounds.Height < 350)
                         continue;
 
-                    var buttons = window.FindAll(
+                    var controls = window.FindAll(
                         TreeScope.Descendants,
-                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+                        new OrCondition(
+                            new PropertyCondition(
+                                AutomationElement.ControlTypeProperty,
+                                ControlType.Button),
+                            new PropertyCondition(
+                                AutomationElement.ControlTypeProperty,
+                                ControlType.ComboBox)));
 
-                    foreach (AutomationElement button in buttons)
+                    foreach (AutomationElement button in controls)
                     {
                         try
                         {
