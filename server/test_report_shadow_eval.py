@@ -46,6 +46,24 @@ class ShadowReport(unittest.TestCase):
         self.assertIn("gpt-5.6-luna:low", result["pareto_frontier"])
         self.assertNotIn("gpt-5.6-sol:medium", result["pareto_frontier"])
 
+    def test_partially_unpriced_retry_is_not_treated_as_full_actual_cost(self):
+        turn = self.turn("a", "gpt-5.6-sol", "medium")
+        turn["attempts"].append({
+            "model": "external/unpriced",
+            "status": 200,
+            "terminal_type": "response.completed",
+            "usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 0,
+                "output_tokens": 10,
+            },
+        })
+        turn["retry_count"] = 1
+        result = report.summarize([turn], {}, {}, 7, 1)
+        row = result["pairs"][0]
+        self.assertEqual(row["priced_turns"], 0)
+        self.assertIsNone(row["avg_actual_credits"])
+
     def test_transition_cost_does_not_claim_counterfactual_quality(self):
         turn = self.turn("a", "gpt-5.6-sol", "medium")
         turn["jev_route"] = {"model": "gpt-5.6-terra", "effort": "high"}
