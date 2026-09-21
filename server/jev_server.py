@@ -1464,15 +1464,6 @@ class Handler(BaseHTTPRequestHandler):
                     model, effort, speed, gate = route(tier, depth)
                     model, effort, smart_gate = apply_guardrails(
                         model, effort, task, step, session, failure_streak)
-                    # Circuit breaker: skip an open model upward without another
-                    # paid Jev judgement.
-                    alt_model, breaker_rerouted = breaker_pick(model)
-                    if alt_model is None:
-                        breaker_blocked = True
-                        smart_gate = (smart_gate + "+" if smart_gate != "apply" else "") + "breaker_open"
-                    elif breaker_rerouted:
-                        model = alt_model
-                        smart_gate = (smart_gate + "+" if smart_gate != "apply" else "") + "breaker"
                     if smart_gate != "apply":
                         gate = f"{gate}+{smart_gate}"
                 except Exception as exc:
@@ -1505,8 +1496,20 @@ class Handler(BaseHTTPRequestHandler):
         dry_reason = None
         native_model = model
 
-        # Display the model actually serving the request, including shadow and
-        # operational fallbacks, rather than a hypothetical classification.
+        # Claim the circuit immediately before the actual forward, after shadow
+        # and other operational overrides have chosen the model that will really
+        # be served. This avoids reserving a half-open probe for a model that is
+        # later replaced before any upstream attempt occurs.
+        alt_model, breaker_rerouted = breaker_pick(model)
+        if alt_model is None:
+            breaker_blocked = True
+            gate = f"{gate}+breaker_open"
+        elif breaker_rerouted:
+            model = alt_model
+            gate = f"{gate}+breaker"
+
+        # Display the model actually serving the request, including shadow,
+        # breaker reroutes, and operational fallbacks.
         shown = {"model": model, "effort": effort or (payload.get("reasoning") or {}).get("effort")}
         marker = route_marker(shown["model"], shown["effort"])
         signature = answer_signature(shown)
