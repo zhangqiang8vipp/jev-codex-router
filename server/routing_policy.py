@@ -1,7 +1,7 @@
 """Shared Jev decision contract: one model/effort choice plus bounded context."""
 import math
 
-POLICY_VERSION = "joint-v2-context"
+POLICY_VERSION = "joint-v3-route-lease"
 LUNA = "gpt-5.6-luna"
 TERRA = "gpt-5.6-terra"
 SOL = "gpt-5.6-sol"
@@ -32,10 +32,13 @@ QUESTIONS = {
         "instructions": {
             "question": "Which model AND reasoning effort together best fit the next model call?",
             "objective": (
-                "Select the cheapest model/effort pair that is sufficiently capable for a "
-                "correct next step, while considering likely corrections, retries, and the "
-                "cost of a wrong answer. Judge capability and effort jointly: more effort "
-                "on a smaller model is not automatically equivalent to a stronger model."
+                "Select the cheapest model/effort pair that is sufficiently capable for the "
+                "current user turn or execution phase, not merely the next trivial tool call. "
+                "The selected pair may stay leased across tool continuations until a real "
+                "boundary or repeated failure, so include the likely reasoning needed to carry "
+                "this phase forward correctly. Consider corrections, retries, and the cost of "
+                "a wrong answer. Judge capability and effort jointly: more effort on a smaller "
+                "model is not automatically equivalent to a stronger model."
             ),
             "evidence": (
                 "Use the current request, recent assistant intent, available tool evidence, "
@@ -48,8 +51,10 @@ QUESTIONS = {
             "continuity": (
                 "For a short continuation such as continue/继续, interpret it in light of the "
                 "previous assistant intent and session route instead of treating the short text "
-                "as a new trivial task. For a successful mechanical tool continuation, a much "
-                "cheaper pair may still be appropriate."
+                "as a new trivial task. Normal tool call/result loops are continuity-constrained "
+                "and usually reuse an existing route without asking this question again. When "
+                "this question is asked to recover a missing lease, choose a pair suitable for "
+                "the remaining execution phase rather than only the immediate tool result."
             ),
             "neutrality": (
                 "There is no target model distribution. Do not prefer Luna merely because it "
