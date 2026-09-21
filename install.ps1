@@ -171,11 +171,36 @@ function Ensure-JevKeyFile([string]$Explicit) {
 
   $parent = Split-Path -Parent $path
   [void][IO.Directory]::CreateDirectory($parent)
-  [IO.File]::WriteAllText(
-    $path,
-    "TYPESAFE_API_KEY=$($plain.Trim())`r`n",
-    [Text.UTF8Encoding]::new($false)
-  )
+
+  $lines = if (Test-Path -LiteralPath $path -PathType Leaf) {
+    @(Get-Content -LiteralPath $path)
+  } else {
+    @()
+  }
+  $replacement = "TYPESAFE_API_KEY=$($plain.Trim())"
+  $replaced = $false
+  $updated = foreach ($line in $lines) {
+    if (-not $replaced -and $line -match '^\s*TYPESAFE_API_KEY\s*=') {
+      $replaced = $true
+      $replacement
+    } else {
+      $line
+    }
+  }
+  if (-not $replaced) {
+    $updated = @($updated) + $replacement
+  }
+
+  $temp = "$path.tmp-$([Guid]::NewGuid().ToString("N"))"
+  try {
+    [IO.File]::WriteAllLines($temp, [string[]]@($updated), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temp -Destination $path -Force
+  } finally {
+    if (Test-Path -LiteralPath $temp) {
+      Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+    }
+  }
+
   Protect-KeyFile $path
   return $path
 }
@@ -189,6 +214,16 @@ function Stop-ExistingJevTasks {
     } catch {}
   }
   Start-Sleep -Milliseconds 400
+}
+
+function Start-ExistingJevTasks {
+  foreach ($name in @("Jev Codex Router", "Jev Codex Auto Toggle")) {
+    try {
+      if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+        Start-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 
 function Install-SourceTree([string]$Destination) {
@@ -242,6 +277,7 @@ function Restore-SourceTree($InstallResult) {
   try {
     if (Test-Path -LiteralPath $InstallResult.Path) { Remove-Item -LiteralPath $InstallResult.Path -Recurse -Force }
     Move-Item -LiteralPath $InstallResult.Backup -Destination $InstallResult.Path
+    Start-ExistingJevTasks
     Write-Warning "Restored the previous Jev Codex Router source tree after setup failed."
   } catch {
     Write-Warning "Setup failed and the previous source tree could not be restored automatically: $($_.Exception.Message)"
