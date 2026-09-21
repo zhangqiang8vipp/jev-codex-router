@@ -2,11 +2,17 @@
 
 [![ci](https://github.com/zhangqiang8vipp/jev-codex-router/actions/workflows/ci.yml/badge.svg)](https://github.com/zhangqiang8vipp/jev-codex-router/actions/workflows/ci.yml)
 
-**Per-turn model routing for Codex, driven by [Jev](https://docs.typesafe.ai) (TypeSafe System One).**
+**Session-aware model routing for Codex, with [Jev](https://docs.typesafe.ai) (TypeSafe System One) as the current semantic route judge.**
 
-Jev chooses a model and thinking effort together for each model call, including
-continuations after tools. Every route uses standard speed. The objective is
-sufficient capability for the next decision with no unnecessary quota consumption.
+A meaningful user turn opens a route lease (model + reasoning effort). Tool
+continuations, background calls and compaction continuations keep that route
+without asking Jev again; repeated tool failures may raise the lease locally.
+The next meaningful user turn reopens semantic routing. Every route uses
+standard speed.
+
+The long-term product direction is a local session-aware Codex execution
+runtime that jointly manages continuity, context and model capacity. See
+[VISION.md](VISION.md).
 
 **Historical simulation: ≈ −60 % vs full Astra** on 237 turns under the old
 policy. This is not measured Codex quota saved, nor evidence for the current
@@ -30,8 +36,9 @@ does **not** duplicate them. On Windows it adds one small WPF/UIAutomation
   native redirect, Codex's own model + reasoning choices go straight through
   the native ChatGPT path.
 - **Auto ON**: Codex Router's `native-redirect` is set to `jev/auto`.
-  Every native GPT Responses call that reaches the router is dynamically
-  classified by Jev and served by the selected model/effort pair.
+  A meaningful user turn is classified by Jev and establishes a route lease.
+  Subsequent tool/background/compaction calls in that session normally reuse
+  the leased model/effort without another Jev request.
 - Turning Auto OFF restores the redirect that existed before Auto was enabled,
   if there was one. It never destroys a pre-existing operator redirect.
 - The overlay does not click or rewrite Codex's model picker. It only calls the
@@ -62,10 +69,15 @@ Codex native model + reasoning controls
           │                    │
           │             jev_server.py (:4319)
           │                    │
-          │                   Jev
-          │                    │
-          │             smart guardrails
-          │                    │
+          │          session route lease
+          │          KEEP? ────────┐
+          │             │ no       │ yes
+          │             ▼          │
+          │            Jev         │
+          │             │          │
+          │        smart guardrails│
+          │             └────┬─────┘
+          │                  │
           │       Luna / Terra / Sol / Astra
           │                    │
           └──────────┬─────────┘
@@ -91,11 +103,13 @@ Codex native model + reasoning controls
 ## Routing policy
 
 The shared contract in `server/routing_policy.py` gives Jev 20 explicit pairs:
-Luna, Terra, Sol or Astra × low, medium, high, xhigh or max thinking. Jev chooses
-the pair in one Choice question using capability profiles, the current request,
-recent assistant intent, the latest tool evidence, and bounded session/repository
-signals. Every pair uses standard speed, overriding an incoming Fast setting,
-including retries and bypass modes.
+Luna, Terra, Sol or Astra × low, medium, high, xhigh or max thinking. On a
+semantic REPLAN, Jev chooses one pair for the current user turn/execution phase
+using capability profiles, the current request, recent assistant intent, the
+latest tool evidence, and bounded session/repository signals. The pair is then
+stored as a Route Lease and reused across continuity calls. Every pair uses
+standard speed, overriding an incoming Fast setting, including retries and
+bypass modes.
 
 There is no preferred model, target distribution, keyword-to-model rule,
 low-confidence fallback to Sol, mechanical-step exception, or compaction pin.
@@ -111,21 +125,28 @@ A missing/invalid Jev response or a provider error still uses the separately
 logged technical fail-open route (Astra at medium); the manual kill switch and
 native-quota exhaustion are operational bypasses, not Jev decisions.
 
-### Smart continuity guardrails
+### Session route lease + smart guardrails
 
-The smart-router branch keeps Jev as the semantic chooser but adds bounded local
-evidence and deterministic recovery rules:
+The production router now asks a cheaper question before it asks Jev:
+**did the semantic work actually change?**
 
-- only a hashed thread key, previous model/effort, failure streak, project basename,
-  dirty-file count and aggregate diff-line count are retained;
-- source code, filenames and absolute paths are not sent to Jev;
-- one failed tool call cannot immediately downgrade model or reasoning effort;
-- two consecutive failed tool steps floor the next call at Sol + high;
-- three floor it at Astra + xhigh, while max remains a Jev decision;
-- a very short continuation can lower model and effort by at most one rung, while
-  a successful mechanical tool continuation may still fall directly to Luna + low.
+- meaningful new user turn → REPLAN through Jev;
+- exact replay of the same user turn → KEEP the existing semantic decision;
+- tool call/result continuation → KEEP;
+- background or compaction continuation → KEEP;
+- one failed tool result → KEEP;
+- two consecutive failed tool steps → raise locally to at least Sol + high;
+- three → raise locally to at least Astra + xhigh;
+- policy-version mismatch or missing lease → recover with one new Jev decision.
 
-These are recovery/continuity floors, not keyword-based task classification.
+Only hashed session/turn identity, model/effort, failure streak, project basename,
+dirty-file count and aggregate diff-line count are retained. Source code,
+filenames, absolute paths and prompt text are not stored in the lease. The
+per-session semantic decision lock coalesces concurrent duplicate route decisions.
+
+Short follow-up hysteresis still applies when a **new user turn** legitimately
+reopens Jev routing; it is no longer used to reclassify every successful tool
+continuation.
 
 ### Codex-dry tandem — only while native usage is exhausted
 
@@ -199,11 +220,13 @@ scripts share the live decision contract and reject a cache from another policy.
 
 Every real Codex call now produces a second, privacy-reduced evaluation event in
 `~/.codex/codex-router/jev-shadow-eval.jsonl`. The request is still executed
-**once**. Shadow Eval records three distinct routes:
+**once**. Shadow Eval records route provenance as well as the routes:
 
-- **Jev route** — the raw typed Choice result before local guardrails;
-- **smart route** — the production route after continuity/recovery guardrails;
-- **served route** — the model that actually answered after quota fallback/retry.
+- **route source/reason** — Jev REPLAN, lease KEEP, or local lease escalation;
+- **Jev route** — the raw typed Choice result when this call actually opened a
+  Jev decision (null on ordinary lease reuse);
+- **smart route** — the production semantic route after continuity/recovery;
+- **served route** — the model that actually answered after operational fallback/retry.
 
 It also records the Responses outcome, per-attempt token usage, cached-input
 tokens, cache-write counters when reported, end-to-end/Jev latency, retry count,
@@ -418,21 +441,3 @@ and does not claim counterfactual model quality.
 
 This tree is MIT. Fork it, strip it, or replace the policy. You do not need to
 ask. Keep the original copyright notice in copies of the Software.
-
-Suggested local edit points:
-
-| Want | File |
-|---|---|
-| Change model + effort choices | `server/routing_policy.py` |
-| Change session/repo guardrails | `server/smart_context.py` |
-| Bump the logged policy id | `POLICY_VERSION` in `server/routing_policy.py` |
-| Swap Codex-dry substitutes | tandem tables in `server/jev_server.py` |
-| Recalibrate after changes | `python3 server/report_routing.py --days 7` |
-
-Do not reuse a replay cache built under another `POLICY_VERSION`.
-
-Upstream origin: [0xNatoshi/jev-codex-router](https://github.com/0xNatoshi/jev-codex-router).
-
-## License
-
-MIT
