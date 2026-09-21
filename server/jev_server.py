@@ -72,6 +72,8 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from auto_control import set_enabled as set_auto_enabled
+from auto_control import status as auto_status
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
                             TERRA, TIERS, decision_from_answers, route)
 from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
@@ -85,6 +87,7 @@ CODEX_HOME = os.path.realpath(os.path.expanduser(
     os.environ.get("CODEX_HOME", os.path.join(HOME, ".codex"))))
 STATE = os.path.realpath(os.path.expanduser(
     os.environ.get("CODEX_ROUTER_STATE_DIR", os.path.join(CODEX_HOME, "codex-router"))))
+CODEX_ROUTER_DIR = os.environ.get("CODEX_ROUTER_DIR", "").strip()
 ENV_PATH = os.path.join(HOME, ".hermes", ".env")
 LEGACY_ENV_PATH = os.path.join(HOME, ".jev.env")
 CALLER_SECRET_PATH = os.path.join(STATE, "caller-secret")
@@ -119,7 +122,7 @@ ROUTER = ("127.0.0.1", _port_from_env(
     "MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", default=4202))
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.5"
+VERSION = "1.6"
 VIRTUAL_MODEL_ID = "auto"
 VIRTUAL_MODEL_SLUG = "jev/auto"
 VIRTUAL_CONTEXT_WINDOW = 1_050_000
@@ -138,6 +141,7 @@ ASK_MAX_STATE_CHARS = 120_000
 ASK_MAX_QUESTIONS = 40
 ASK_TIMEOUT = 15.0
 ASK_TYPES = ("noul", "choice", "score")
+CONTROL_MAX_BYTES = 4096
 
 # Codex-dry tandem: used ONLY while native (ChatGPT) usage is exhausted.
 GO_STANDARD = "deepseek/deepseek-v4.1-flash"
@@ -214,6 +218,24 @@ GOAL_BODY_RX = re.compile(
 ENVELOPE_SCAN_CHARS = 200_000
 
 _log_lock = threading.Lock()
+_route_status_lock = threading.Lock()
+_last_route_status = {}
+
+
+def update_last_route_status(model, effort, gate, at):
+    with _route_status_lock:
+        _last_route_status.clear()
+        _last_route_status.update({
+            "model": model,
+            "effort": effort,
+            "gate": gate,
+            "at": at,
+        })
+
+
+def last_route_status():
+    with _route_status_lock:
+        return dict(_last_route_status)
 
 
 def key_paths():
@@ -1051,6 +1073,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _auto_status(self):
+        snapshot = auto_status(STATE, CODEX_ROUTER_DIR).as_dict()
+        snapshot["route"] = last_route_status() or None
+        snapshot["policy_version"] = POLICY_VERSION
+        return snapshot
+
+    def _auto_control(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > CONTROL_MAX_BYTES:
+            self.close_connection = True
+            return self._json(413, {"error": {"message": "control body too large"}})
+        raw = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return self._json(400, {"error": {"message": "invalid json"}})
+        if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+            return self._json(400, {"error": {"message": "enabled must be boolean"}})
+        result = set_auto_enabled(STATE, CODEX_ROUTER_DIR, body["enabled"])
+        payload = result.as_dict()
+        payload["route"] = last_route_status() or None
+        payload["policy_version"] = POLICY_VERSION
+        code = 200 if result.available and result.error is None else 503
+        return self._json(code, payload)
+
     def _ask(self):
         """Typed pass-through to System One for local callers (:4319, loopback only).
 
@@ -1107,9 +1154,12 @@ class Handler(BaseHTTPRequestHandler):
                     "supports_vision": True,
                 }],
             })
+        elif path in ("/control/status", "/v1/control/status"):
+            self._json(200, self._auto_status())
         elif path in ("/health", ""):
             self._json(200, {"ok": True, "service": "jev-router", "version": VERSION,
-                             "policy_version": POLICY_VERSION})
+                             "policy_version": POLICY_VERSION,
+                             "auto": self._auto_status()["auto"]})
         else:
             self._json(404, {"error": {"message": "not found"}})
 
@@ -1128,6 +1178,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path.rstrip("/") in ASK_PATHS:
             return self._ask()
+        if path.rstrip("/") in ("/control/auto", "/v1/control/auto"):
+            return self._auto_control()
         if "/responses" not in path:
             return self._json(404, {"error": {"message": f"unsupported path {path}"}})
 
@@ -1353,6 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
             "would": would,
             "task": task[:110],
         })
+        update_last_route_status(model, effort, gate, finished_at)
         append_shadow_event(
             SHADOW_EVAL_PATH,
             build_turn_event(
