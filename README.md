@@ -289,10 +289,11 @@ This is the PowerShell equivalent of `curl ... | sh`: it downloads the latest
 `main` source into `%LOCALAPPDATA%\JevCodexRouter\source`, finds or
 automatically installs the local Codex Router checkout, installs/updates the Jev
 service and Auto overlay, and runs the readiness checks. Re-running the same
-command upgrades the tool. The integration keeps Codex Router credential
-discovery enabled because sharing the existing local Codex ChatGPT session is a
-required part of native signed routing; it still selects no external upstream
-provider during the base-router bootstrap.
+command upgrades the tool. The base Codex Router is first installed in its
+valid idle mode (no provider, credential discovery disabled). The Jev setup
+then explicitly enables credential discovery before authorizing the existing
+local Codex ChatGPT session for signed routing. No external upstream provider
+is selected during that bootstrap transition.
 
 If Codex Router is in a non-standard folder, set it before the same command:
 
