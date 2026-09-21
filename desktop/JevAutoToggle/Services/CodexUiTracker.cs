@@ -28,9 +28,7 @@ internal sealed class CodexUiTracker
         try
         {
             var desktop = AutomationElement.RootElement;
-            var windows = desktop.FindAll(
-                TreeScope.Children,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
+            var windows = desktop.FindAll(TreeScope.Children, Condition.TrueCondition);
 
             CodexAnchor? best = null;
             double bestScore = double.MinValue;
