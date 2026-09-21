@@ -79,7 +79,10 @@ from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
                            session_key)
 
 HOME = os.path.expanduser("~")
-STATE = os.path.join(HOME, ".codex", "codex-router")
+CODEX_HOME = os.path.realpath(os.path.expanduser(
+    os.environ.get("CODEX_HOME", os.path.join(HOME, ".codex"))))
+STATE = os.path.realpath(os.path.expanduser(
+    os.environ.get("CODEX_ROUTER_STATE_DIR", os.path.join(CODEX_HOME, "codex-router"))))
 ENV_PATH = os.path.join(HOME, ".hermes", ".env")
 LEGACY_ENV_PATH = os.path.join(HOME, ".jev.env")
 CALLER_SECRET_PATH = os.path.join(STATE, "caller-secret")
@@ -98,7 +101,7 @@ LISTEN = ("127.0.0.1", 4319)
 ROUTER = ("127.0.0.1", 4202)
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.2"
+VERSION = "1.3"
 
 API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
