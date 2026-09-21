@@ -97,11 +97,30 @@ SESSION_PATH = os.path.join(STATE, "jev-router-sessions.json")
 SESSION_STORE = SessionStore(SESSION_PATH)
 REPO_PROFILER = RepoProfiler()
 
-LISTEN = ("127.0.0.1", 4319)
-ROUTER = ("127.0.0.1", 4202)
+def _port_from_env(*names, default):
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if not value:
+            continue
+        try:
+            port = int(value)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535:
+            return port
+    return default
+
+
+LISTEN = ("127.0.0.1", _port_from_env("JEV_ROUTER_PORT", default=4319))
+ROUTER = ("127.0.0.1", _port_from_env(
+    "MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", default=4202))
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.3"
+VERSION = "1.4"
+VIRTUAL_MODEL_ID = "auto"
+VIRTUAL_MODEL_SLUG = "jev/auto"
+VIRTUAL_CONTEXT_WINDOW = 1_050_000
+VIRTUAL_MAX_OUTPUT_TOKENS = 128_000
 
 API = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
@@ -1070,11 +1089,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {
                 "object": "list",
                 "data": [{
-                    "id": "auto",
+                    "id": VIRTUAL_MODEL_ID,
                     "object": "model",
                     "created": 1758000000,
                     "owned_by": "jev",
                     "name": DISPLAY_NAME,
+                    "display_name": DISPLAY_NAME,
+                    "context_length": VIRTUAL_CONTEXT_WINDOW,
+                    "max_output_tokens": VIRTUAL_MAX_OUTPUT_TOKENS,
+                    "input_modalities": ["text", "image"],
+                    "output_modalities": ["text"],
+                    "supports_tools": True,
+                    "supports_reasoning": True,
+                    "supports_vision": True,
                 }],
             })
         elif path in ("/health", ""):
@@ -1476,14 +1503,16 @@ def installation_check():
         })
 
     conn = http.client.HTTPConnection(*ROUTER, timeout=3)
+    router_ok = False
     try:
         conn.request("GET", "/health", headers={"Accept": "application/json"})
         resp = conn.getresponse()
         body = resp.read(2048)
+        router_ok = resp.status == 200
         checks.append({
             "name": "codex_router",
-            "ok": resp.status == 200,
-            "detail": f"http {resp.status}" + ("" if resp.status == 200 else f": {body[:160].decode('utf-8', 'replace')}"),
+            "ok": router_ok,
+            "detail": f"http {resp.status}" + ("" if router_ok else f": {body[:160].decode('utf-8', 'replace')}"),
         })
     except Exception as exc:
         checks.append({
@@ -1493,6 +1522,45 @@ def installation_check():
         })
     finally:
         conn.close()
+
+    if router_ok and secret:
+        conn = http.client.HTTPConnection(*ROUTER, timeout=3)
+        try:
+            conn.request(
+                "GET",
+                f"/_codex-router/{secret}/v1/models",
+                headers={"Accept": "application/json"},
+            )
+            resp = conn.getresponse()
+            raw = resp.read(512 * 1024)
+            catalog = json.loads(raw.decode("utf-8")) if resp.status == 200 else {}
+            rows = catalog.get("data") if isinstance(catalog, dict) else None
+            ids = {
+                row.get("id")
+                for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+            } if isinstance(rows, list) else set()
+            loaded = VIRTUAL_MODEL_SLUG in ids
+            checks.append({
+                "name": "jev_model",
+                "ok": loaded,
+                "detail": "jev/auto loaded"
+                          if loaded
+                          else "jev/auto missing; run setup-local.sh or curate-models, then restart Codex Router",
+            })
+        except Exception as exc:
+            checks.append({
+                "name": "jev_model",
+                "ok": False,
+                "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+            })
+        finally:
+            conn.close()
+    else:
+        checks.append({
+            "name": "jev_model",
+            "ok": False,
+            "detail": "skipped: Codex Router or caller secret not ready",
+        })
 
     return {
         "ok": all(item["ok"] for item in checks),
