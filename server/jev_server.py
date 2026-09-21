@@ -39,8 +39,8 @@ Debug: file ~/.codex/codex-router/jev-router.debug → dump request shapes
 (jev-router-debug.jsonl) and raw response streams (jev-router-debug-stream.log).
 Display: streamed reasoning summaries get the routed tag appended in place
 ( · 🧠sol:low · ) so the Codex thread shows the picked model per call.
-The same rewriter keeps one response id across a relayed stream: a tandem stream
-has already crossed the local edge once, so its terminal event carries a
+The same rewriter keeps one response id across a relayed stream: the response
+has already crossed the local edge once, so its terminal event can carry a
 re-encrypted id, and the Responses consumer in front of us refuses a completion
 whose id differs from the one `response.created` announced.
 Non-stream callers (auto-compaction checkpoints, litellm non-stream path)
@@ -49,18 +49,9 @@ Balance: sufficient capability and effort for the next decision, including
 compaction. Capability profiles are priors; outcome quality requires evaluation.
 Log: ~/.codex/codex-router/jev-router-live.jsonl
 
-Codex-dry tandem: when native usage is exhausted — a manual flag file
-(~/.codex/codex-router/jev-router.codex-dry) or an observed quota failure
-(429 / usage-limit body) — the native four-tier set is replaced until the window resets:
-frontier-tier (astra) calls go to GLM (opencode-go/glm-5.3-flash), every
-other tier to deepseek (opencode-go/deepseek-v4.1-flash). A quota failure
-flips the state and retries the same call on the tandem; a successful native
-call clears an auto state (never the manual flag). A tandem call that comes
-back retryable (429/5xx) is tried once on the sibling model, because the two Go
-models are metered separately and a spent allowance is reported the same way a
-transient outage is. The decided depth travels with the call, mapped onto the Go
-ladder (low/high/max): a low step stays low, medium and high become high, and
-xhigh or above become max.
+Auto routing is OpenAI-only: the served model must remain one of the four
+native tiers (Luna, Terra, Sol, Astra). Native quota failures are returned to
+the caller as-is; Jev never substitutes a third-party model.
 """
 import codecs
 import http.client
@@ -147,41 +138,6 @@ CONTROL_MAX_BYTES = 4096
 # a realistic merged catalog so the checker never parses a deliberately
 # truncated JSON document.
 MODEL_CATALOG_MAX_BYTES = 16 * 1024 * 1024
-
-# Codex-dry tandem: used ONLY while native (ChatGPT) usage is exhausted.
-GO_STANDARD = "deepseek/deepseek-v4.1-flash"
-GO_FRONTIER = "deepseek/deepseek-v4.1-flash"
-GO_TANDEM = (GO_STANDARD, GO_FRONTIER)
-# The tandem's own thinking ladder. Both Go models declare low/high/max where the
-# native four-tier set exposes low/medium/high/xhigh/max, so a depth keeps its meaning
-# by landing on the middle rung instead of collapsing onto the floor: Jev says
-# "medium" about work it wants done carefully, and DeepSeek documents its `low`
-# as "no deep reasoning needed". The API forwarder clamps the value a second time
-# onto the route's declared ladder, so nothing off-ladder can reach a provider.
-TANDEM_EFFORT = {
-    "none": "low", "minimal": "low", "low": "low",
-    "medium": "high", "high": "high",
-    "xhigh": "max", "max": "max", "ultra": "max",
-}
-# A status the *other* half of the tandem might still answer. opencode Go meters
-# the two Go models against separate allowances, and its gateway reports a spent
-# allowance with the same 429/503 shape as a transient one, so one more attempt
-# on the sibling model is worth it before the turn is lost. Nothing has reached
-# the client at this point: the forwarder only returns a retryable status before
-# it writes anything.
-RETRYABLE_TANDEM_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
-DRY_MANUAL_PATH = os.path.join(STATE, "jev-router.codex-dry")
-DRY_STATE_PATH = os.path.join(STATE, "jev-router.codex-dry.json")
-DRY_COOLDOWN_S = 30 * 60
-# The edge announces when the exhausted window reopens, so an automatic flip
-# lasts until that instant (plus a small skew, so the re-probe cannot race the
-# reset itself) instead of a flat cooldown that keeps the tandem serving a
-# window which already came back. The horizon is the backstop: a bogus or
-# hostile announcement still cannot pin the router to the tandem for a week.
-DRY_RESET_SKEW_S = 5
-DRY_MAX_HORIZON_S = 7 * 24 * 3600
-QUOTA_RX = re.compile(
-    r"(?i)(rate[ _-]?limit|out_of_usage|usage limit|hit your usage|insufficient_quota|quota)")
 
 # The events that close a Responses stream and repeat the response id it opened
 # with. A relayed (tandem) stream is rewritten onto that opening id.
@@ -276,123 +232,6 @@ def load_key():
 def caller_secret():
     with open(CALLER_SECRET_PATH, encoding="utf-8") as fh:
         return fh.read().strip()
-
-
-def _read_json(path):
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return None
-
-
-def _positive_seconds(value):
-    """A positive number of seconds, or None for anything unusable."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
-
-
-def quota_reset_at(headers, body):
-    """When the exhausted usage window reopens, or None if it is not announced.
-
-    The local edge answers an exhausted quota with the reset instant in its
-    headers (`x-codex-primary-reset-at`, and its `-after-seconds` twin); the JSON
-    body repeats it as `resets_at` / `resets_in_seconds`. The relative header is
-    preferred because it needs no clock agreement. When nothing usable comes
-    back, the flip falls back to the bounded cooldown.
-    """
-    now = time.time()
-    after = _positive_seconds(headers.get("x-codex-primary-reset-after-seconds"))
-    if after:
-        return now + after
-    at = _positive_seconds(headers.get("x-codex-primary-reset-at"))
-    if at and at > now:
-        return at
-    if not body:
-        return None
-    try:
-        payload = json.loads(body.decode("utf-8", "replace"))
-    except ValueError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    error = payload.get("error")
-    fields = error if isinstance(error, dict) else payload
-    after = _positive_seconds(fields.get("resets_in_seconds"))
-    if after:
-        return now + after
-    at = _positive_seconds(fields.get("resets_at"))
-    return at if at and at > now else None
-
-
-def native_dry():
-    """Reason native usage is considered exhausted, or None while it is fine.
-
-    The manual flag wins; the auto state carries an expiry so a stale flip
-    can never pin the router to the tandem forever.
-    """
-    if os.path.exists(DRY_MANUAL_PATH):
-        return "manual"
-    state = _read_json(DRY_STATE_PATH)
-    if isinstance(state, dict) and float(state.get("until") or 0) > time.time():
-        return str(state.get("reason") or "quota")
-    return None
-
-
-def mark_native_dry(reason, resets_at=None):
-    """Flip to the Go tandem, for as long as the exhausted window stays shut.
-
-    `resets_at` is the instant the edge said the window reopens. Ending the
-    state just after it is what sends the next call back to the native four-tier set
-    as soon as the quota returns; without that announcement the flip keeps the
-    bounded cooldown instead.
-    """
-    now = time.time()
-    until = now + DRY_COOLDOWN_S
-    if resets_at and resets_at > now:
-        until = min(resets_at + DRY_RESET_SKEW_S, now + DRY_MAX_HORIZON_S)
-    try:
-        tmp = DRY_STATE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({
-                "reason": reason,
-                "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "until": until,
-                "until_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(until)),
-            }, fh)
-        os.replace(tmp, DRY_STATE_PATH)
-    except OSError:
-        pass
-
-
-def clear_native_dry():
-    try:
-        os.remove(DRY_STATE_PATH)
-    except OSError:
-        pass
-
-
-def tandem_effort(effort, native_model=None):
-    """Map a decided depth onto the rungs the Go tandem accepts."""
-    if effort in TANDEM_EFFORT:
-        return TANDEM_EFFORT[effort]
-    # An absent or unknown depth keeps the tier's own habit: the frontier goes as
-    # deep as it can, everything else starts at the middle rung.
-    return "max" if native_model == ASTRA else "high"
-
-
-def other_tandem(target):
-    """The sibling Go model, for one bounded fallback attempt."""
-    return GO_FRONTIER if target == GO_STANDARD else GO_STANDARD
-
-
-def dry_target(native_model, effort):
-    """Codex-dry tandem: frontier-tier steps -> GLM, everything else -> deepseek."""
-    target = GO_FRONTIER if native_model == ASTRA else GO_STANDARD
-    return target, tandem_effort(effort, native_model)
 
 
 def call_jev(key, state, questions=None, timeout=4.0):
@@ -654,18 +493,12 @@ ROUTE_GLYPHS = {
     "gpt-6-astra": ("astra", "🚀"),      # frontier
     TERRA: ("terra", "🌍"),
 }
-TANDEM_GLYPHS = {
-    "deepseek-v4.1-flash": ("deepseek", "🐳"),  # Go standard (native dry)
-    "glm-5.3-flash": ("glm", "✨"),             # Go frontier (native dry)
-}
-
-
 def route_label(model):
     """(short name, glyph) of a routed call — the vocabulary of both tags."""
     short, glyph = ROUTE_GLYPHS.get(model, (None, None))
     if not short:
         leaf = (model or "?").split("/")[-1]
-        short, glyph = TANDEM_GLYPHS.get(leaf, (leaf, "⚡"))
+        short, glyph = leaf, "⚡"
     return short, glyph
 
 
@@ -1287,15 +1120,10 @@ class Handler(BaseHTTPRequestHandler):
             would = {"model": model, "effort": effort, "speed": speed, "gate": gate}
             model, effort, speed, gate = ASTRA, None, "default", "shadow(astra)"
 
-        # Codex-dry tandem: ONLY while native usage is exhausted (manual flag or
-        # observed quota failure) the native four-tier set is replaced — GLM for frontier
-        # steps, deepseek for the rest. Otherwise luna/terra/sol/astra run untouched.
-        dry_reason = native_dry()
+        # Jev Auto is intentionally OpenAI-only. No quota or operational path
+        # may substitute a third-party model.
+        dry_reason = None
         native_model = model
-        if dry_reason and model in TIERS:
-            model, effort = dry_target(native_model, effort)
-            speed = "default"
-            gate = f"codex_dry({dry_reason}):{native_model}"
 
         # Display the model actually serving the request, including shadow and
         # operational fallbacks, rather than a hypothetical classification.
@@ -1320,56 +1148,10 @@ class Handler(BaseHTTPRequestHandler):
 
         out_path = path if path.startswith("/v1") else "/v1" + path
         self._attempts = []
-        status, out_kind, ctype, quota_hit, unwritten, resets_at = self._forward(
+        status, out_kind, ctype, _quota_hit, _unwritten, _resets_at = self._forward(
             payload, out_path, stream_requested, debug, marker, model, signature)
         retried = False
         fallback = None
-        if quota_hit and not dry_reason:
-            # Native usage is exhausted: flip to the Go tandem and retry this very
-            # call so the turn does not fail (nothing reached the client yet). The
-            # flip lasts until the edge says the window reopens, so the first call
-            # after the reset is served by the native four-tier set again.
-            mark_native_dry("quota", resets_at=resets_at)
-            model, effort = dry_target(native_model, effort)
-            apply_route(payload, model, effort)
-            retried = True
-            # The log records the state this call entered, not the one it started
-            # in: reading `dry: None` next to `codex_dry(retry)` is how a flip
-            # looks like it never happened when calibrating from the log.
-            dry_reason = "quota"
-            gate = f"codex_dry(retry):{native_model}"
-            marker = route_marker(model, effort)
-            signature = answer_signature({"model": model, "effort": effort})
-            status, out_kind, ctype, quota_hit, unwritten, _resets_at = self._forward(
-                payload, out_path, stream_requested, debug, marker, model, signature)
-        elif status == 200 and not dry_reason and model in TIERS and os.path.exists(DRY_STATE_PATH):
-            # Native answered again: drop the stale auto state (never the flag).
-            clear_native_dry()
-            dry_reason = "cleared"
-        if model in GO_TANDEM and status in RETRYABLE_TANDEM_STATUS:
-            # Half of the tandem refused this call, so try the sibling model
-            # before the turn is lost. The two Go models are metered against
-            # separate allowances, and a spent allowance arrives as the same
-            # 429/503 a transient outage does -- which is exactly what killed a
-            # live session on 18 September 2026 after the handoff.
-            fallback = other_tandem(model)
-            model, effort = fallback, tandem_effort(effort, native_model)
-            apply_route(payload, model, effort)
-            gate = f"codex_dry(fallback):{native_model}"
-            marker = route_marker(model, effort)
-            signature = answer_signature({"model": model, "effort": effort})
-            status, out_kind, ctype, quota_hit, unwritten, _resets_at = self._forward(
-                payload, out_path, stream_requested, debug, marker, model, signature)
-        if unwritten is not None:
-            # Every model that could have served this turn refused it, and the
-            # refusal was held back only because another attempt might have
-            # followed. None did, so the caller gets the refusal instead of a
-            # request nobody ever answers.
-            self.send_response(status)
-            self.send_header("Content-Type", ctype or "application/json")
-            self.send_header("Content-Length", str(len(unwritten)))
-            self.end_headers()
-            self.wfile.write(unwritten)
 
         finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         total_ms = int((time.time() - t0) * 1000)
@@ -1441,13 +1223,9 @@ class Handler(BaseHTTPRequestHandler):
         """One relay attempt to the local caller edge, streamed straight back.
 
         Returns (status, out_kind, ctype, quota_hit, unwritten, resets_at).
-        ``quota_hit`` is True only for a >=400 response whose body looks like
-        exhausted usage; in that case nothing has been written to the client
-        yet, so the caller can retry the same payload on another model.
-        ``unwritten`` carries that response's body for the caller to relay if no
-        retry follows, and is None whenever the response already reached the
-        client. ``resets_at`` is the instant that refusal said the window
-        reopens, when it announced one.
+        The last three fields are retained as false/None placeholders for call
+        site and logging compatibility. This OpenAI-only router never retries a
+        quota failure on a third-party model.
         """
         body = json.dumps(payload).encode("utf-8")
         conn = http.client.HTTPConnection(*ROUTER, timeout=900)
@@ -1517,11 +1295,6 @@ class Handler(BaseHTTPRequestHandler):
                 data = resp.read()
                 out_ctype = ctype or "application/json"
                 head = data[:64].lstrip()
-                if status >= 400 and (status == 429 or QUOTA_RX.search(data.decode("utf-8", "replace"))):
-                    # Held back, not written: the caller decides whether another
-                    # model gets this call first. The refusal also carries the
-                    # instant the window reopens, which is how long the flip lasts.
-                    return status, out_kind, ctype, True, data, quota_reset_at(resp.headers, data)
                 # The caller edge always streams; rebuild a proper single JSON
                 # object for non-stream callers (compactions, litellm's
                 # non-stream provider path) instead of forwarding raw SSE bytes.
