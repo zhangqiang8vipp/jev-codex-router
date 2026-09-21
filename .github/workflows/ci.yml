@@ -28,6 +28,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build Windows Auto toggle
+        run: dotnet build desktop/JevAutoToggle/JevAutoToggle.csproj -c Release
       - name: Byte-compile Python on Windows
         run: python -m compileall -q server poc
       - name: Parse PowerShell scripts
@@ -36,6 +41,7 @@ jobs:
           $files = @(
             "setup-local.ps1",
             "server/install-service.ps1",
+            "server/install-toggle.ps1",
             "server/uninstall-service.ps1",
             "server/run-service.ps1",
             "server/run-shadow-report.ps1"
