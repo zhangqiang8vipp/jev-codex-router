@@ -1550,7 +1550,7 @@ class Handler(BaseHTTPRequestHandler):
         task, prev_assistant, signals = extract(payload)
         step = classify(payload)
         cwd = extract_cwd(payload)
-        thread_key = session_key(payload, cwd)
+        thread_key = session_key(payload, cwd, self.headers)
         session = SESSION_STORE.get(thread_key)
         failure_streak = next_failure_streak(session, step)
         repo = REPO_PROFILER.snapshot(cwd)
@@ -2298,11 +2298,3 @@ def print_installation_check(result):
 def main(argv=None):
     argv = list(argv if argv is not None else __import__("sys").argv[1:])
     if argv == ["--check"]:
-        return print_installation_check(installation_check(require_model=True))
-    if argv == ["--check-core"]:
-        return print_installation_check(installation_check(require_model=False))
-    if argv:
-        print("usage: python3 server/jev_server.py [--check|--check-core]", flush=True)
-        return 2
-
-    server = ThreadingHTTPServer(LISTEN, Handler)
