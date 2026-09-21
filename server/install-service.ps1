@@ -105,6 +105,12 @@ $settingsParams = @{
 $settings = New-ScheduledTaskSettingsSet @settingsParams
 $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
 
+$existingServiceTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($existingServiceTask) {
+  try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
+  Start-Sleep -Milliseconds 500
+}
+
 Register-ScheduledTask -TaskName $TaskName -Action $serviceAction -Trigger @($logon, $heartbeat) -Settings $settings -Principal $principal -Force | Out-Null
 
 $evalArgs = @(
