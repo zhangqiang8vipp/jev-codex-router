@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Jev Codex Router — local server on 127.0.0.1:4319 for the Codex Router.
 
 Receives Responses requests destined for the "jev/auto" model (the Codex
@@ -50,12 +50,13 @@ compaction. Capability profiles are priors; outcome quality requires evaluation.
 Log: ~/.codex/codex-router/jev-router-live.jsonl
 
 Auto routing is OpenAI-only: the served model must remain one of the four
-native tiers (Luna, Terra, Sol, Astra). Native quota failures are returned to
-the caller as-is; Jev never substitutes a third-party model.
+native tiers (Luna, Terra, Sol, Astra). Terminal native quota failures are
+carried across the generic-provider hop as a non-retryable Responses failure;
+Jev never substitutes a third-party model.
 """
 import codecs
-import http.client
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -114,7 +115,7 @@ ROUTER = ("127.0.0.1", _port_from_env(
     "MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", default=4202))
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.6"
+VERSION = "1.7"
 VIRTUAL_MODEL_ID = "auto"
 VIRTUAL_MODEL_SLUG = "jev/auto"
 VIRTUAL_CONTEXT_WINDOW = 1_050_000
@@ -140,8 +141,40 @@ CONTROL_MAX_BYTES = 4096
 # truncated JSON document.
 MODEL_CATALOG_MAX_BYTES = 16 * 1024 * 1024
 
+# Codex can replay the exact same Responses request several times while handling
+# a transient/terminal failure. A routing judgement is pure for that request, so
+# paying TypeSafe again for every transport retry is waste. Cache only successful
+# routing judgements, keyed by a digest of the original request bytes (never the
+# request content itself), and coalesce concurrent identical calls.
+ROUTE_CACHE_TTL_S = 45.0
+ROUTE_CACHE_MAX_ENTRIES = 256
+ROUTE_SINGLEFLIGHT_WAIT_S = 8.0
+
+# Native ChatGPT usage exhaustion is special. If it crosses the generic jev
+# provider boundary as HTTP 429, the outer Codex Router rewrites the body and
+# Codex's HTTP transport spends its retry budget before it can classify the
+# subscription error. For streaming turns we therefore carry terminal quota as
+# a successful HTTP SSE envelope with a fatal Responses error code. Current
+# Codex classifies insufficient_quota as terminal UsageLimitExceeded.
+TERMINAL_QUOTA_TYPES = frozenset({"usage_limit_reached", "usage_not_included"})
+TERMINAL_QUOTA_CODES = frozenset({
+    "usage_limit_reached",
+    "usage_not_included",
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+})
+TERMINAL_QUOTA_HEADERS = frozenset({
+    "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted",
+    "workspace_owner_usage_limit_reached",
+    "workspace_member_usage_limit_reached",
+})
+
 # The events that close a Responses stream and repeat the response id it opened
-# with. A relayed (tandem) stream is rewritten onto that opening id.
+# with. A relayed stream is rewritten onto that opening id.
 TERMINAL_EVENT_TYPES = ("response.completed", "response.incomplete", "response.failed")
 
 ERROR_RX = re.compile(
@@ -182,6 +215,16 @@ ENVELOPE_SCAN_CHARS = 200_000
 _log_lock = threading.Lock()
 _route_status_lock = threading.Lock()
 _last_route_status = {}
+_route_cache_lock = threading.Lock()
+_route_cache = {}
+_route_flights = {}
+
+
+class _RouteFlight:
+    def __init__(self):
+        self.event = threading.Event()
+        self.result = None
+        self.error = None
 
 
 def update_last_route_status(model, effort, gate, at):
@@ -198,6 +241,133 @@ def update_last_route_status(model, effort, gate, at):
 def last_route_status():
     with _route_status_lock:
         return dict(_last_route_status)
+
+
+def _route_cache_key(request_bytes):
+    digest = hashlib.sha256()
+    digest.update(POLICY_VERSION.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(request_bytes)
+    return digest.hexdigest()
+
+
+def _purge_route_cache(now):
+    expired = [key for key, (until, _result) in _route_cache.items() if until <= now]
+    for key in expired:
+        _route_cache.pop(key, None)
+    while len(_route_cache) > ROUTE_CACHE_MAX_ENTRIES:
+        _route_cache.pop(next(iter(_route_cache)))
+
+
+def call_jev_for_route(key, state, request_bytes, timeout=4.0):
+    """One paid Jev route judgement per identical request within the short TTL.
+
+    Returns (result, reuse), where reuse is miss, hit or coalesced. Failures are
+    shared only with callers already waiting on the same in-flight judgement;
+    they are never cached for later requests.
+    """
+    cache_key = _route_cache_key(request_bytes)
+    now = time.monotonic()
+    with _route_cache_lock:
+        _purge_route_cache(now)
+        cached = _route_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1], "hit"
+        flight = _route_flights.get(cache_key)
+        if flight is None:
+            flight = _RouteFlight()
+            _route_flights[cache_key] = flight
+            owner = True
+        else:
+            owner = False
+
+    if not owner:
+        if not flight.event.wait(ROUTE_SINGLEFLIGHT_WAIT_S):
+            # A wedged leader must not wedge the request forever. This bounded
+            # escape is intentionally not cached; normal calls finish in <=4s.
+            return call_jev_routed(key, state, timeout=timeout), "miss"
+        if flight.error is not None:
+            raise flight.error
+        if flight.result is not None:
+            return flight.result, "coalesced"
+        return call_jev_routed(key, state, timeout=timeout), "miss"
+
+    try:
+        result = call_jev_routed(key, state, timeout=timeout)
+        flight.result = result
+        with _route_cache_lock:
+            _route_cache[cache_key] = (time.monotonic() + ROUTE_CACHE_TTL_S, result)
+            _purge_route_cache(time.monotonic())
+        return result, "miss"
+    except Exception as exc:
+        flight.error = exc
+        raise
+    finally:
+        with _route_cache_lock:
+            _route_flights.pop(cache_key, None)
+        flight.event.set()
+
+
+def _error_object(data):
+    try:
+        parsed = json.loads(data.decode("utf-8", "replace"))
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    inner = parsed.get("error")
+    return inner if isinstance(inner, dict) else parsed
+
+
+def terminal_quota_error(status, headers, data):
+    """Return a fatal Codex SSE error for native subscription exhaustion only."""
+    if status != 429:
+        return None
+
+    inner = _error_object(data)
+    error_type = str(inner.get("type") or "").strip().lower()
+    code = str(inner.get("code") or "").strip().lower()
+    reached = str(headers.get("x-codex-rate-limit-reached-type") or "").strip().lower()
+    terminal = (
+        error_type in TERMINAL_QUOTA_TYPES
+        or code in TERMINAL_QUOTA_CODES
+        or reached in TERMINAL_QUOTA_HEADERS
+    )
+    if not terminal:
+        return None
+
+    message = inner.get("message")
+    if not isinstance(message, str) or not message.strip():
+        message = "You have reached your Codex usage limit. Wait for the usage window to reset or check your ChatGPT plan."
+
+    # usage_limit_reached is understood on Codex's HTTP error path but not by
+    # its SSE response.failed parser. insufficient_quota is terminal on both
+    # current Codex Desktop and CLI and maps to UsageLimitExceeded.
+    fatal_code = "usage_not_included" if (
+        error_type == "usage_not_included" or code == "usage_not_included"
+    ) else "insufficient_quota"
+    return {"code": fatal_code, "message": message.strip()}
+
+
+def quota_failure_sse(error):
+    event = {
+        "type": "response.failed",
+        "sequence_number": 0,
+        "response": {
+            "id": "resp_jev_quota",
+            "object": "response",
+            "created_at": int(time.time()),
+            "status": "failed",
+            "background": False,
+            "error": error,
+        },
+    }
+    return (
+        "event: response.failed\n"
+        + "data: "
+        + json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+    ).encode("utf-8")
 
 
 def key_paths():
@@ -251,89 +421,6 @@ def call_jev(key, state, questions=None, timeout=4.0):
 def call_jev_routed(key, state, questions=None, timeout=4.0):
     """One System One call, on the direct TypeSafe API."""
     return call_jev(key, state, questions, timeout=timeout)
-
-# ---------------------------------------------------------------------------
-# Circuit breaker: track per-model upstream failures so a rate-limited model
-# stops being selected for a cooldown window instead of hammering it.
-# ---------------------------------------------------------------------------
-_BREAKER = {}            # model -> (fail_count, first_fail_ts, open_until)
-_BREAKER_THRESHOLD = 2   # consecutive failures before opening
-_BREAKER_OPEN_S = 60.0   # how long a model is skipped
-_BREAKER_HALF_S = 30.0   # half-open probe window
-
-def breaker_record(model, ok):
-    """Record upstream result. Returns True if model is currently available."""
-    now = time.time()
-    entry = _BREAKER.get(model)
-    if ok:
-        if entry:
-            _BREAKER.pop(model, None)
-        return True
-    if entry is None:
-        _BREAKER[model] = (1, now, 0.0)
-        return True
-    count, first_ts, open_until = entry
-    count += 1
-    if count >= _BREAKER_THRESHOLD and open_until == 0.0:
-        open_until = now + _BREAKER_OPEN_S
-    _BREAKER[model] = (count, first_ts, open_until)
-    return open_until == 0.0 or now >= open_until
-
-def breaker_available(model):
-    """Check if a model is available (not in open circuit state)."""
-    entry = _BREAKER.get(model)
-    if entry is None:
-        return True
-    count, first_ts, open_until = entry
-    now = time.time()
-    if open_until == 0.0:
-        return True
-    # Half-open: allow one probe after the cooldown
-    if now >= open_until + _BREAKER_HALF_S:
-        _BREAKER[model] = (0, now, 0.0)  # reset to allow probe
-        return True
-    return now >= open_until
-
-def breaker_pick(preferred_model):
-    """If preferred model is open, pick the next available tier upward."""
-    if breaker_available(preferred_model):
-        return preferred_model, False
-    idx = TIERS.index(preferred_model) if preferred_model in TIERS else 0
-    for candidate in list(TIERS[idx+1:]) + list(TIERS[:idx]):
-        if breaker_available(candidate):
-            return candidate, True
-    return preferred_model, False  # all open; let it try anyway
-
-# ---------------------------------------------------------------------------
-# Route cache: cache Jev routing decisions for identical retry requests so a
-# retry storm does not re-spend TypeSafe credits on the same routing call.
-# ---------------------------------------------------------------------------
-_ROUTE_CACHE = {}
-_ROUTE_CACHE_MAX = 200
-_ROUTE_CACHE_TTL = 45.0
-
-def _route_cache_key(thread_key, task, step, signals):
-    raw = "{}|{}|{}|{}".format(
-        thread_key or "", (task or "")[:300],
-        step.get("step_type"), signals.get("tool_history"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-
-def _route_cache_get(key):
-    entry = _ROUTE_CACHE.get(key)
-    if not entry:
-        return None
-    decision, ts = entry
-    if time.time() - ts > _ROUTE_CACHE_TTL:
-        _ROUTE_CACHE.pop(key, None)
-        return None
-    return decision
-
-def _route_cache_put(key, decision):
-    if len(_ROUTE_CACHE) >= _ROUTE_CACHE_MAX:
-        oldest = min(_ROUTE_CACHE, key=lambda k: _ROUTE_CACHE[k][1])
-        _ROUTE_CACHE.pop(oldest, None)
-    _ROUTE_CACHE[key] = (decision, time.time())
-
 
 
 def validate_ask(body):
@@ -982,7 +1069,7 @@ def log_line(record):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "jev-router/1.6"
+    server_version = f"jev-router/{VERSION}"
 
     def log_message(self, *args):
         pass
@@ -1008,7 +1095,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": {"message": "control body too large"}})
         raw = self.rfile.read(length) if length else b""
         try:
-            body = json.loads(raw.decode("utf-8"))
+            body = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return self._json(400, {"error": {"message": "invalid json"}})
         if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
@@ -1034,7 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": {"message": f"body too large ({length} bytes)"}})
         raw = self.rfile.read(length) if length else b""
         try:
-            body = json.loads(raw.decode("utf-8"))
+            body = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return self._json(400, {"error": {"message": "invalid json"}})
         state, questions, error = validate_ask(body)
@@ -1108,7 +1195,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return self._json(400, {"error": {"message": "invalid json"}})
         if not isinstance(payload, dict):
@@ -1152,10 +1239,10 @@ class Handler(BaseHTTPRequestHandler):
 
         tier = depth = conf = None
         jev_ms = None
+        jev_cache = None
         decision = None
         jev_usage = None
         smart_gate = None
-        cache_key = _route_cache_key(thread_key, task, step, signals)
         if os.path.exists(OFF_PATH):
             model, effort, speed, gate = ASTRA, None, "default", "off"
         else:
@@ -1164,42 +1251,31 @@ class Handler(BaseHTTPRequestHandler):
                 jt0 = time.time()
                 state = jev_state(task, prev_assistant, signals, step)
                 state = enrich_jev_state(state, task, session, repo, failure_streak)
-                cached_decision = _route_cache_get(cache_key)
                 try:
-                    if cached_decision is not None:
-                        decision = cached_decision
-                        tier, depth, conf = (decision["model"], decision["effort"],
-                                             decision["confidence"])
-                    else:
-                        result = call_jev_routed(key, state)
-                        decision = decision_from_answers(result.get("answers"))
-                        raw_usage = result.get("usage") or {}
-                        if not isinstance(raw_usage, dict):
-                            raw_usage = {}
-                        jev_usage = {k: v for k, v in raw_usage.items()
-                                     if k in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
-                                     and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
-                        tier, depth, conf = (decision["model"], decision["effort"],
-                                             decision["confidence"])
+                    result, jev_cache = call_jev_for_route(key, state, raw)
+                    decision = decision_from_answers(result.get("answers"))
+                    raw_usage = result.get("usage") or {}
+                    if not isinstance(raw_usage, dict):
+                        raw_usage = {}
+                    jev_usage = (
+                        {k: v for k, v in raw_usage.items()
+                         if k in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
+                         and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                        if jev_cache == "miss" else None
+                    )
+                    tier, depth, conf = (decision["model"], decision["effort"],
+                                         decision["confidence"])
                     model, effort, speed, gate = route(tier, depth)
                     model, effort, smart_gate = apply_guardrails(
                         model, effort, task, step, session, failure_streak)
-                    # Circuit breaker: skip a model whose circuit is open.
-                    alt_model, rerouted = breaker_pick(model)
-                    if rerouted:
-                        model = alt_model
-                        smart_gate = (smart_gate + "+" if smart_gate != "apply" else "") + "breaker_reroute"
-                    if cached_decision is not None and smart_gate == "apply":
-                        gate = "apply+cache"
                     if smart_gate != "apply":
                         gate = f"{gate}+{smart_gate}"
-                    if cached_decision is None:
-                        _route_cache_put(cache_key, decision)
                 except Exception as exc:
                     model, effort, speed, gate = ASTRA, "medium", "default", f"jev_error:{type(exc).__name__}"
                 jev_ms = int((time.time() - jt0) * 1000)
             else:
                 model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
+
         # Capture the production smart route before operational shadow/dry
         # overrides. The raw Jev route remains tier/depth above.
         smart_model, smart_effort, smart_speed, smart_route_gate = (
@@ -1252,11 +1328,6 @@ class Handler(BaseHTTPRequestHandler):
         retried = False
         fallback = None
 
-
-        # Record upstream result into the circuit breaker so consecutive
-        # failures open the circuit and stop selecting this model.
-        upstream_ok = status == 200
-        breaker_record(model, upstream_ok)
         finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         total_ms = int((time.time() - t0) * 1000)
         log_line({
@@ -1265,6 +1336,7 @@ class Handler(BaseHTTPRequestHandler):
             "route_probabilities": decision["probabilities"] if decision else None,
             "chosen_probability": decision["chosen_probability"] if decision else None,
             "jev_usage": jev_usage,
+            "jev_cache": jev_cache,
             "attempts": self._attempts,
             "gate": gate,
             "tier": tier,
@@ -1333,7 +1405,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         body = json.dumps(payload).encode("utf-8")
         conn = http.client.HTTPConnection(*ROUTER, timeout=900)
-        conn = http.client.HTTPConnection(*ROUTER, timeout=60)
+        status = 0
         out_kind = ""
         ctype = ""
         attempt = {"model": model, "effort": (payload.get("reasoning") or {}).get("effort"),
@@ -1414,27 +1486,25 @@ class Handler(BaseHTTPRequestHandler):
                             headerer._sign_message_item(item)
                         data = json.dumps(assembled).encode("utf-8")
                         out_ctype = "application/json"
-                if status != 200 and stream_requested:
-                    out_kind = "json"
-                    # Rewrite upstream error to match OpenAI native format so Codex
-                    # shows the friendly usage-limit message instead of retrying.
-                    try:
-                        parsed = json.loads(data.decode("utf-8", "replace"))
-                        inner = parsed.get("error", parsed) if isinstance(parsed, dict) else {}
-                    except (ValueError, UnicodeDecodeError):
-                        inner = {}
-                    if status == 429:
-                        inner["type"] = "rate_limit_error"
-                        inner["code"] = "rate_limit_exceeded"
-                        inner.setdefault("message", "You have hit your rate limit. Check your workspace usage settings to continue.")
-                    data = json.dumps({"error": inner}).encode("utf-8")
-                    self.send_response(status)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(data)))
+                quota_error = terminal_quota_error(status, resp.headers, data)
+                if quota_error is not None and stream_requested:
+                    # Do not expose terminal ChatGPT quota as HTTP 429 through
+                    # the generic Jev provider. The outer Router would rewrite
+                    # that provider error and Codex would exhaust its HTTP retry
+                    # budget before seeing the subscription semantics. A 200 SSE
+                    # response.failed survives the generic provider hop, and
+                    # Codex treats insufficient_quota as terminal.
+                    out_kind = "sse"
+                    stream = quota_failure_sse(quota_error)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Content-Length", str(len(stream)))
                     self.send_header("Connection", "close")
                     self.end_headers()
-                    self.wfile.write(data)
+                    self.wfile.write(stream)
                 else:
+                    # Ordinary rate-limit 429s remain 429s. They are genuinely
+                    # retryable and must not be mislabeled as exhausted usage.
                     self.send_response(status)
                     self.send_header("Content-Type", out_ctype)
                     self.send_header("Content-Length", str(len(data)))
@@ -1558,7 +1628,7 @@ def installation_check(require_model=True):
                 )
                 resp = conn.getresponse()
                 raw = read_bounded_response(resp, MODEL_CATALOG_MAX_BYTES)
-                catalog = json.loads(raw.decode("utf-8")) if resp.status == 200 else {}
+                catalog = json.loads(raw.decode("utf-8-sig")) if resp.status == 200 else {}
                 rows = catalog.get("data") if isinstance(catalog, dict) else None
                 ids = {
                     row.get("id")
