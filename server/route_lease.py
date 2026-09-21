@@ -141,13 +141,15 @@ def contains_compaction(payload: Dict[str, Any]) -> bool:
 def tool_step_key(
     payload: Dict[str, Any],
     *,
+    digest: str = "",
     session_key: Optional[str] = None,
 ) -> Optional[str]:
     """Privacy-preserving identity for the latest tool-result continuation.
 
     Codex can replay an identical Responses request after transport trouble.
     Failure streaks must advance for a new tool result, not for every replay of
-    the same result. Only the digest is persisted.
+    the same result. Use the already-bounded tool digest plus call id rather
+    than hashing an arbitrarily large tool output again.
     """
     inp = payload.get("input")
     if not isinstance(inp, list) or not inp:
@@ -155,14 +157,13 @@ def tool_step_key(
     last = inp[-1]
     if not isinstance(last, dict):
         return None
-    if last.get("type") not in ("function_call_output", "custom_tool_call_output"):
+    kind = last.get("type")
+    if kind not in ("function_call_output", "custom_tool_call_output"):
         return None
-    try:
-        encoded = json.dumps(last, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    except (TypeError, ValueError):
-        encoded = str(last.get("call_id") or last.get("type") or "tool_step")
-    digest = hashlib.sha256(encoded.encode("utf-8", "replace")).hexdigest()
-    seed = f"{session_key or ''}|tool:{digest}"
+    call_id = last.get("call_id")
+    call_id = call_id if isinstance(call_id, str) else ""
+    bounded_digest = digest if isinstance(digest, str) else ""
+    seed = f"{session_key or ''}|tool:{kind}|call:{call_id}|digest:{bounded_digest}"
     return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
 
 
