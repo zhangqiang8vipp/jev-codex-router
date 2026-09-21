@@ -56,33 +56,96 @@ function Test-DotNet8 {
   }
 }
 
+function Test-ExcludedPythonPath([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
+  $normalized = $Path.Replace("/", "\").ToLowerInvariant()
+
+  # The Windows Store aliases are placeholders rather than a Python runtime.
+  if ($normalized -like "*\microsoft\windowsapps\python*.exe") { return $true }
+
+  # For this repair path we deliberately need a non-uv CPython runtime because
+  # the existing failure is inside the uv-managed Windows Python/OpenSSL stack.
+  if ($normalized -like "*\uv\python\*") { return $true }
+
+  return $false
+}
+
+function Add-PythonCandidate(
+  [System.Collections.Generic.List[string]]$Candidates,
+  [string]$Candidate
+) {
+  if ([string]::IsNullOrWhiteSpace($Candidate)) { return }
+  try { $full = [IO.Path]::GetFullPath($Candidate.Trim()) } catch { return }
+  if (Test-ExcludedPythonPath $full) { return }
+  if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return }
+  if (-not $Candidates.Contains($full)) { [void]$Candidates.Add($full) }
+}
+
 function Resolve-SystemPython {
   $candidates = New-Object System.Collections.Generic.List[string]
 
-  if (Get-Command py.exe -ErrorAction SilentlyContinue) {
+  $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+  if ($launcher) {
     foreach ($selector in @("-3.12", "-3")) {
       try {
-        $candidate = (& py.exe $selector -c "import sys; print(sys.executable)" 2>$null | Select-Object -Last 1)
-        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($candidate)) {
-          [void]$candidates.Add($candidate.Trim())
+        $candidate = (& $launcher.Source $selector -c "import sys; print(sys.executable)" 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -eq 0) {
+          Add-PythonCandidate $candidates $candidate
         }
       } catch {}
     }
   }
 
-  $python = Get-Command python.exe -ErrorAction SilentlyContinue
-  if ($python) { [void]$candidates.Add($python.Source) }
+  foreach ($commandName in @("python.exe", "python3.exe")) {
+    $command = Get-Command $commandName -ErrorAction SilentlyContinue
+    if ($command) { Add-PythonCandidate $candidates $command.Source }
+  }
 
-  foreach ($candidate in $candidates | Select-Object -Unique) {
+  # winget's python.org package may not be on this PowerShell process PATH
+  # immediately after install, so also inspect its standard per-user/system
+  # installation roots.
+  $roots = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $roots += (Join-Path $env:LOCALAPPDATA "Programs\Python")
+  }
+  if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+    $roots += $env:ProgramFiles
+  }
+  $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+  if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+    $roots += $programFilesX86
+  }
+
+  foreach ($root in $roots | Select-Object -Unique) {
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
     try {
-      & $candidate -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+      Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "Python3*" } |
+        ForEach-Object {
+          Add-PythonCandidate $candidates (Join-Path $_.FullName "python.exe")
+        }
+    } catch {}
+  }
+
+  foreach ($candidate in $candidates) {
+    try {
+      & $candidate -I -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info >= (3, 10) else 1)" 2>$null
       if ($LASTEXITCODE -eq 0) {
-        return [IO.Path]::GetFullPath($candidate)
+        return $candidate
       }
     } catch {}
   }
 
-  throw "A system CPython 3.10+ runtime was not found."
+  throw "A non-uv system CPython 3.10+ runtime was not found."
+}
+
+function Test-SystemPython {
+  try {
+    [void](Resolve-SystemPython)
+    return $true
+  } catch {
+    return $false
+  }
 }
 
 function Test-PythonOpenSsl([string]$Python) {
@@ -557,7 +620,7 @@ Write-Host "Repository: https://github.com/$RepoOwner/$RepoName"
 
 Ensure-Dependency "Git" { [bool](Get-Command git.exe -ErrorAction SilentlyContinue) } "Git.Git" "Install Git for Windows and rerun."
 Ensure-Dependency "Node.js" { [bool](Get-Command node.exe -ErrorAction SilentlyContinue) } "OpenJS.NodeJS.LTS" "Install Node.js LTS and rerun."
-Ensure-Dependency "Python 3" { [bool](Get-Command py.exe -ErrorAction SilentlyContinue) -or [bool](Get-Command python.exe -ErrorAction SilentlyContinue) } "Python.Python.3.12" "Install Python 3.11+ and rerun."
+Ensure-Dependency "CPython 3.10+" { Test-SystemPython } "Python.Python.3.12" "Install the python.org CPython 3.12 package and rerun."
 Ensure-Dependency ".NET 8 SDK" { Test-DotNet8 } "Microsoft.DotNet.SDK.8" "Install the .NET 8 SDK and rerun."
 
 $RouterDir = Resolve-RouterCheckout $RouterDir
