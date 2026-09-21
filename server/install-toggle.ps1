@@ -41,6 +41,14 @@ function Get-AutoToggleProcesses([string]$Directory) {
   }
 }
 
+function Signal-AutoToggleShutdown {
+  try {
+    $event = [Threading.EventWaitHandle]::OpenExisting("Local\JevCodexAutoToggle.Shutdown")
+    try { [void]$event.Set() } finally { $event.Dispose() }
+    Start-Sleep -Milliseconds 500
+  } catch {}
+}
+
 function Stop-AutoToggleProcesses([string]$Directory, [int]$TimeoutSeconds = 10) {
   foreach ($process in @(Get-AutoToggleProcesses $Directory)) {
     try {
@@ -108,6 +116,11 @@ try {
     throw "Published Auto toggle executable was not found: $exe"
   }
 
+  # Ask a current overlay to shut down before touching its WPF files. Older
+  # builds do not know this event; the bounded process-stop fallback below
+  # still handles them.
+  Signal-AutoToggleShutdown
+
   $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($existing) {
     try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
@@ -119,7 +132,10 @@ try {
   # WPF loads satellite resource DLLs (for example zh-Hans PresentationCore)
   # into the overlay process. Windows keeps those files locked until the process
   # exits; stopping the scheduled task alone is not always enough.
-  Stop-AutoToggleProcesses $publishDir 10
+  # Match every managed Jev toggle under StateDir, not only the current fixed
+  # publish directory. This also catches stale/versioned overlay processes left
+  # by an interrupted upgrade.
+  Stop-AutoToggleProcesses $StateDir 10
 
   if (Test-Path -LiteralPath $publishDir) {
     Remove-DirectoryWithRetry $publishDir 8
