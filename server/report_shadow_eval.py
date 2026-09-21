@@ -131,8 +131,8 @@ def summarize(turns, feedback, stats, days, min_turns):
     route_changes = retry_turns = immediate_failures = 0
     tool_feedback_turns = tool_errors = 0
     route_sources = {}
-    lease_reuse_turns = jev_decision_turns = jev_attempt_turns = 0
-    jev_paid_call_turns = 0
+    lease_reuse_turns = jev_decision_turns = jev_error_turns = 0
+    jev_cache_miss_turns = jev_cache_reuse_turns = 0
     total_input = total_cached = 0
     latency = []
     actual_credit_total = 0.0
@@ -150,10 +150,12 @@ def summarize(turns, feedback, stats, days, min_turns):
             lease_reuse_turns += 1
         if route_source == "jev":
             jev_decision_turns += 1
-        if route_source in ("jev", "jev_error_fallback"):
-            jev_attempt_turns += 1
+        if route_source == "jev_error_fallback":
+            jev_error_turns += 1
         if event.get("jev_cache") == "miss":
-            jev_paid_call_turns += 1
+            jev_cache_miss_turns += 1
+        elif event.get("jev_cache") in ("hit", "coalesced"):
+            jev_cache_reuse_turns += 1
         if event.get("route_changed"):
             route_changes += 1
         if (event.get("retry_count") or 0) > 0:
@@ -337,8 +339,9 @@ def summarize(turns, feedback, stats, days, min_turns):
         "lease_reuse_turns": lease_reuse_turns,
         "lease_reuse_rate": round(lease_reuse_turns / total, 4) if total else None,
         "jev_decision_turns": jev_decision_turns,
-        "jev_attempt_turns": jev_attempt_turns,
-        "jev_paid_call_turns": jev_paid_call_turns,
+        "jev_error_turns": jev_error_turns,
+        "jev_cache_miss_turns": jev_cache_miss_turns,
+        "jev_cache_reuse_turns": jev_cache_reuse_turns,
         "route_changes": route_changes,
         "route_change_rate": round(route_changes / total, 4) if total else None,
         "immediate_failures": immediate_failures,
@@ -391,7 +394,7 @@ def render_text(report):
         "",
         "Overall",
         f"  lease reuse: {report['lease_reuse_turns']} ({pct(report['lease_reuse_rate'])})",
-        f"  Jev decisions: {report['jev_decision_turns']} · attempts: {report['jev_attempt_turns']} · paid misses: {report['jev_paid_call_turns']}",
+        f"  Jev decisions: {report['jev_decision_turns']} · errors: {report['jev_error_turns']} · API cache misses: {report['jev_cache_miss_turns']} · cached/coalesced: {report['jev_cache_reuse_turns']}",
         f"  route sources: {report['route_sources']}",
         f"  route changed: {report['route_changes']} ({pct(report['route_change_rate'])})",
         f"  immediate failures: {report['immediate_failures']} ({pct(report['immediate_failure_rate'])})",
