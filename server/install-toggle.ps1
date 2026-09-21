@@ -11,6 +11,62 @@ if ($env:OS -ne "Windows_NT") {
   throw "server/install-toggle.ps1 is for Windows only."
 }
 
+function Get-AutoToggleProcesses([string]$Directory) {
+  $root = ([IO.Path]::GetFullPath($Directory)).TrimEnd("\") + "\"
+  try {
+    return @(
+      Get-CimInstance Win32_Process -Filter "Name = 'JevCodexAutoToggle.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+          $candidate = [string]$_.ExecutablePath
+          if ([string]::IsNullOrWhiteSpace($candidate)) {
+            $candidate = [string]$_.CommandLine
+          }
+          if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
+
+          try {
+            $full = [IO.Path]::GetFullPath($candidate.Trim('"'))
+            return $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+          } catch {
+            return ([string]$_.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+          }
+        }
+    )
+  } catch {
+    return @()
+  }
+}
+
+function Stop-AutoToggleProcesses([string]$Directory, [int]$TimeoutSeconds = 10) {
+  foreach ($process in @(Get-AutoToggleProcesses $Directory)) {
+    try {
+      Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+    } catch {}
+  }
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    $remaining = @(Get-AutoToggleProcesses $Directory)
+    if ($remaining.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+
+  $ids = (@(Get-AutoToggleProcesses $Directory) | ForEach-Object { $_.ProcessId }) -join ","
+  throw "The previous Jev Auto Toggle process did not exit (PID(s): $ids)."
+}
+
+function Remove-DirectoryWithRetry([string]$Path, [int]$Attempts = 8) {
+  for ($i = 0; $i -lt $Attempts; $i++) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try {
+      Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+      return
+    } catch {
+      if ($i -eq $Attempts - 1) { throw }
+      Start-Sleep -Milliseconds (250 * ($i + 1))
+    }
+  }
+}
+
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
 if ([string]::IsNullOrWhiteSpace($StateDir)) {
   $StateDir = if ($env:CODEX_ROUTER_STATE_DIR) {
@@ -50,11 +106,18 @@ try {
   $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($existing) {
     try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
-    Start-Sleep -Milliseconds 400
+    # Unregister before replacing files so the minute heartbeat cannot relaunch
+    # the old executable while its WPF resource assemblies are being removed.
+    try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
   }
 
+  # WPF loads satellite resource DLLs (for example zh-Hans PresentationCore)
+  # into the overlay process. Windows keeps those files locked until the process
+  # exits; stopping the scheduled task alone is not always enough.
+  Stop-AutoToggleProcesses $publishDir 10
+
   if (Test-Path -LiteralPath $publishDir) {
-    Remove-Item -LiteralPath $publishDir -Recurse -Force
+    Remove-DirectoryWithRetry $publishDir 8
   }
   Move-Item -LiteralPath $tempDir -Destination $publishDir
 
