@@ -1602,8 +1602,11 @@ class Handler(BaseHTTPRequestHandler):
                         status, out_kind, ctype, quota_hit, _u, _r, error_bytes = self._forward(
                             payload, out_path, stream_requested, debug, marker,
                             attempt_model, signature, deadline=escalation_deadline)
-                    except (BrokenPipeError, ConnectionResetError, ResponseCommittedError):
+                    except (BrokenPipeError, ConnectionResetError):
                         breaker_release(attempt_model)
+                        raise
+                    except ResponseCommittedError:
+                        breaker_record(attempt_model, False)
                         raise
                     except (http.client.HTTPException, ConnectionError, OSError) as exc:
                         status = 504 if time.monotonic() >= escalation_deadline else 502
@@ -1835,6 +1838,9 @@ class Handler(BaseHTTPRequestHandler):
                 if piece:
                     self.wfile.write(f"{len(piece):X}\r\n".encode("ascii") + piece + b"\r\n")
                     self.wfile.flush()
+                if markerer.terminal_type is None:
+                    raise ResponseCommittedError(
+                        "upstream SSE ended without a terminal Responses event")
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             else:
