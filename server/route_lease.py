@@ -214,6 +214,36 @@ def lease_fields(
     }
 
 
+def served_continuity_fields(
+    lease: Optional[RouteLease],
+    *,
+    served_model: str,
+    served_effort: str,
+    turn_key: Optional[str],
+    policy_version: str,
+) -> Optional[Dict[str, Any]]:
+    """Update a lease to the physical native route that actually completed.
+
+    The update is legal only for the same human turn. This prevents a slow
+    completion from an older turn overwriting a newer turn's lease.
+    """
+    if lease is None or lease.policy_version != policy_version:
+        return None
+    if served_model not in TIER_RANK or served_effort not in EFFORT_RANK:
+        return None
+    if lease.turn_key != turn_key:
+        return None
+    if (lease.model, lease.effort) == (served_model, served_effort):
+        return None
+    return lease_fields(
+        served_model,
+        served_effort,
+        turn_key=lease.turn_key,
+        source="served_continuity",
+        policy_version=policy_version,
+    )
+
+
 def route_action(
     *,
     step_type: str,
