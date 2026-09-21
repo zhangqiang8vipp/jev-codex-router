@@ -20,21 +20,57 @@ This is not a fork of any router: it plugs into an existing local
 **Fork it. Change the policy. Keep your own tandem.** MIT. No permission needed.
 See [Fork and customize](#fork-and-customize--允许自己改) below.
 
+## Auto toggle on Windows
+
+Codex already owns the model picker and reasoning-effort control. This project
+does **not** duplicate them. On Windows it adds one small WPF/UIAutomation
+`Auto` pill next to Codex's native reasoning control.
+
+- **Auto OFF**: Jev Auto is disabled. On a normal installation with no prior
+  native redirect, Codex's own model + reasoning choices go straight through
+  the native ChatGPT path.
+- **Auto ON**: Codex Router's `native-redirect` is set to `jev/auto`.
+  Every native GPT Responses call that reaches the router is dynamically
+  classified by Jev and served by the selected model/effort pair.
+- Turning Auto OFF restores the redirect that existed before Auto was enabled,
+  if there was one. It never destroys a pre-existing operator redirect.
+- The overlay does not click or rewrite Codex's model picker. It only calls the
+  loopback Jev control endpoint, which delegates the actual redirect mutation to
+  Codex Router's own `native-redirect` control path.
+
+Because Codex Router's native redirect is deliberately all-or-nothing, **Auto
+ON also applies to background native GPT turns that reach the router**, not only
+the visible composer turn. The native picker remains visible while Auto is on,
+but its model/effort choice takes effect again only after Auto is turned off.
+
+The button is an independent .NET/WPF overlay anchored with Windows
+UIAutomation; Codex Desktop itself is not patched.
+
 ## How it works
 
 ```
-Codex ──▶ Codex Router (:4202)
-            ├─ native models ──────────────▶ ChatGPT backend (your plan)
-            └─ "jev/auto" ─▶ LiteLLM ─▶ API forwarder
-                                     │
-                                     ▼
-                          jev_server.py (127.0.0.1:4319)
-                            │ 1. classify the turn with Jev
-                            │ 2. apply the routing policy
-                            │    (model, reasoning.effort, service_tier)
-                            ▼
-                          local caller edge (shared native session)
-                            └──▶ luna / terra / sol / astra on the ChatGPT backend
+Codex native model + reasoning controls
+                    │
+                    ▼
+          signed Codex Router (:4202)
+                    │
+          ┌─────────┴──────────┐
+          │                    │
+      Auto OFF              Auto ON
+          │                    │
+ native GPT path       native-redirect=jev/auto
+          │                    │
+          │             jev_server.py (:4319)
+          │                    │
+          │                   Jev
+          │                    │
+          │             smart guardrails
+          │                    │
+          │       Luna / Terra / Sol / Astra
+          │                    │
+          └──────────┬─────────┘
+                     ▼
+            ChatGPT backend (your plan)
 ```
 
 - **Responses in, Responses out** — no format conversion; the SSE stream is
@@ -227,6 +263,7 @@ BACKTEST.md  Savings backtest — protocol, tables, limitations (the "proof")
 AGENTS.md    Autonomous install & operations playbook (for AI agents)
 poc/         Tiering POC, shadow replay, and the backtest tool
 server/      The live server + service install (this is what runs)
+desktop/     Windows WPF Auto toggle anchored beside Codex native controls
 hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 ```
 
@@ -235,7 +272,7 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 ### Windows (recommended for this fork)
 
 Prerequisites: Windows 10/11, Codex Desktop or CLI signed in with ChatGPT,
-PowerShell in FullLanguage mode, Python 3.11+, Node.js, a current
+PowerShell in FullLanguage mode, Python 3.11+, Node.js, the .NET 8 SDK, a current
 [Codex Router](https://github.com/duolahypercho/codex-router) checkout, and a
 TypeSafe API key for Jev.
 
@@ -255,13 +292,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
 
 The Windows setup is idempotent. It verifies Codex Router and the shared ChatGPT
 session, creates/updates the loopback `jev` generic Responses provider,
-installs Jev as a hidden per-user Scheduled Task, registers a one-minute
-heartbeat supervisor, registers the daily rolling Shadow Eval task, discovers
-`auto`, curates `jev/auto` with all five effort levels, applies/restarts the
-router overlay, and runs the full five-part readiness check.
+installs Jev as a hidden per-user Scheduled Task, registers the daily rolling
+Shadow Eval task, discovers and curates `jev/auto`, enables Codex Router's
+signed ChatGPT transport, builds/installs the small `Jev Codex Auto Toggle`
+WPF overlay, and runs the full readiness check.
 
-A successful install ends with `READY`. Fully quit and reopen Codex Desktop,
-then choose **Jev Codex Router**.
+A successful install ends with `READY`. Fully quit and reopen Codex Desktop
+once. **Do not select Jev Codex Router manually.** Keep using Codex's own model
+and reasoning controls; click the small **Auto** pill beside the reasoning
+control when you want dynamic routing.
 
 Useful Windows checks:
 
@@ -269,6 +308,8 @@ Useful Windows checks:
 py -3 server\jev_server.py --check
 Get-ScheduledTask -TaskName "Jev Codex Router"
 Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"
+Get-ScheduledTask -TaskName "Jev Codex Auto Toggle"
+Invoke-RestMethod http://127.0.0.1:4319/control/status
 Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"
 ```
 
@@ -302,6 +343,8 @@ and report format.
 | Read latest 7-day report | `Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"` |
 | Service task status | `Get-ScheduledTask -TaskName "Jev Codex Router"` |
 | Eval task status | `Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"` |
+| Auto toggle task status | `Get-ScheduledTask -TaskName "Jev Codex Auto Toggle"` |
+| Auto status | `Invoke-RestMethod http://127.0.0.1:4319/control/status` |
 | Restart Jev task | `Stop-ScheduledTask -TaskName "Jev Codex Router"; Start-ScheduledTask -TaskName "Jev Codex Router"` |
 | Uninstall Jev tasks | `.\server\uninstall-service.ps1` |
 
@@ -338,14 +381,17 @@ files are the same names under `~/.codex/codex-router/`.
   env file or the process environment; everything else stays on your machine.
 - The server binds `127.0.0.1` only, talks to your local Codex Router only, and
   never logs prompt content beyond a short task excerpt used for calibration.
+- The Auto control endpoint is loopback-only and accepts one boolean. The overlay
+  never receives the TypeSafe key or Codex Router caller secret.
 - Local decision logs and replay data are git-ignored by default.
 
 ## Status
 
-The router now includes production Shadow Eval for outcome/cost calibration and
-first-class Windows background installation. The 7-day Pareto report is
-observational: it measures the route that actually ran and does not claim
-counterfactual model quality.
+The router now includes production Shadow Eval plus a Windows-native Auto
+toggle that leaves Codex's own model/reasoning UI intact. Auto is implemented
+with Codex Router native redirect, not simulated picker clicks. The 7-day
+Pareto report remains observational: it measures the route that actually ran
+and does not claim counterfactual model quality.
 
 ## Fork and customize / 允许自己改
 
