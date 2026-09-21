@@ -142,6 +142,11 @@ ASK_MAX_QUESTIONS = 40
 ASK_TIMEOUT = 15.0
 ASK_TYPES = ("noul", "choice", "score")
 CONTROL_MAX_BYTES = 4096
+# The live Codex catalog contains rich metadata for every routed/native model
+# and can exceed 512 KiB. Keep the readiness read bounded, but large enough for
+# a realistic merged catalog so the checker never parses a deliberately
+# truncated JSON document.
+MODEL_CATALOG_MAX_BYTES = 16 * 1024 * 1024
 
 # Codex-dry tandem: used ONLY while native (ChatGPT) usage is exhausted.
 GO_STANDARD = "deepseek/deepseek-v4.1-flash"
@@ -1554,6 +1559,23 @@ CHECK_QUESTIONS = {
 }
 
 
+def read_bounded_response(resp, limit):
+    """Read one local HTTP body without silently truncating it."""
+    advertised = resp.getheader("Content-Length")
+    if advertised:
+        try:
+            size = int(advertised)
+        except (TypeError, ValueError):
+            size = None
+        if size is not None and size > limit:
+            raise ValueError(f"response body too large ({size} > {limit} bytes)")
+
+    raw = resp.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(f"response body exceeds {limit} bytes")
+    return raw
+
+
 def installation_check(require_model=True):
     """Return bounded readiness checks without ever exposing credentials."""
     checks = []
@@ -1637,7 +1659,7 @@ def installation_check(require_model=True):
                     headers={"Accept": "application/json"},
                 )
                 resp = conn.getresponse()
-                raw = resp.read(512 * 1024)
+                raw = read_bounded_response(resp, MODEL_CATALOG_MAX_BYTES)
                 catalog = json.loads(raw.decode("utf-8")) if resp.status == 200 else {}
                 rows = catalog.get("data") if isinstance(catalog, dict) else None
                 ids = {
