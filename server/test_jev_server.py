@@ -16,6 +16,31 @@ from unittest import mock
 import jev_server as jev
 
 
+class KeyLoading(unittest.TestCase):
+    def test_explicit_env_file_wins_without_exposing_the_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "jev.env")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("TYPESAFE_API_KEY=file-secret\n")
+            with mock.patch.dict(os.environ, {
+                "JEV_ENV_FILE": path,
+                "TYPESAFE_API_KEY": "process-secret",
+            }, clear=False):
+                self.assertEqual(jev.key_paths()[0], os.path.realpath(path))
+                self.assertEqual(jev.load_key(), "file-secret")
+
+    def test_process_env_is_last_resort(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.env")
+            with mock.patch.object(jev, "ENV_PATH", missing), \
+                 mock.patch.object(jev, "LEGACY_ENV_PATH", missing + ".legacy"), \
+                 mock.patch.dict(os.environ, {
+                     "JEV_ENV_FILE": missing + ".override",
+                     "TYPESAFE_API_KEY": "process-secret",
+                 }, clear=False):
+                self.assertEqual(jev.load_key(), "process-secret")
+
+
 class ResponseIdContinuity(unittest.TestCase):
     """One response id per relayed stream, however many gateways touched it.
 
