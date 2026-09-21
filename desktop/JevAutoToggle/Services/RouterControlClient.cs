@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace JevCodexAutoToggle.Services;
 
 internal sealed record RouteSnapshot(string? Model, string? Effort, string? Gate, string? At);
-internal sealed record AutoSnapshot(bool Auto, bool Available, string? Error, RouteSnapshot? Route);
+internal sealed record AutoSnapshot(bool Auto, bool Available, string? Error, string? RedirectModel, RouteSnapshot? Route);
 
 internal sealed class RouterControlClient : IDisposable
 {
@@ -45,6 +45,8 @@ internal sealed class RouterControlClient : IDisposable
             if (root.TryGetProperty("error", out var errorNode) && errorNode.ValueKind == JsonValueKind.String)
                 error = errorNode.GetString();
 
+            var redirectModel = StringProperty(root, "redirect_model");
+
             RouteSnapshot? route = null;
             if (root.TryGetProperty("route", out var routeNode) && routeNode.ValueKind == JsonValueKind.Object)
             {
@@ -58,11 +60,11 @@ internal sealed class RouterControlClient : IDisposable
             if (!success && string.IsNullOrWhiteSpace(error))
                 error = "Auto control request failed.";
 
-            return new AutoSnapshot(auto, available, error, route);
+            return new AutoSnapshot(auto, available, error, redirectModel, route);
         }
         catch (JsonException)
         {
-            return new AutoSnapshot(false, false, "Invalid response from Jev Router.", null);
+            return new AutoSnapshot(false, false, "Invalid response from Jev Router.", null, null);
         }
     }
 
