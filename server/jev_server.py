@@ -1867,6 +1867,11 @@ class Handler(BaseHTTPRequestHandler):
             "chosen_probability": decision["chosen_probability"] if decision else None,
             "jev_usage": jev_usage,
             "jev_cache": jev_cache,
+            "route_source": route_source,
+            "lease_action": lease_action,
+            "lease_reason": lease_reason,
+            "compacted": compacted,
+            "turn": turn_key[:10] if turn_key else None,
             "attempts": self._attempts,
             "gate": gate,
             "tier": tier,
@@ -1918,6 +1923,9 @@ class Handler(BaseHTTPRequestHandler):
                 total_ms=total_ms,
                 jev_ms=jev_ms,
                 step_type=step["step_type"],
+                route_source=route_source,
+                route_reason=lease_reason,
+                jev_cache=jev_cache,
                 dry_reason=dry_reason,
                 fallback=fallback,
             ),
@@ -2298,18 +2306,3 @@ def main(argv=None):
         return 2
 
     server = ThreadingHTTPServer(LISTEN, Handler)
-    server.daemon_threads = True
-    os.makedirs(STATE, exist_ok=True)
-    for path in (LOG_PATH, SHADOW_EVAL_PATH, SESSION_PATH):
-        try:
-            if os.path.exists(path):
-                os.chmod(path, 0o600)
-        except OSError:
-            pass
-    print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
-    server.serve_forever()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
