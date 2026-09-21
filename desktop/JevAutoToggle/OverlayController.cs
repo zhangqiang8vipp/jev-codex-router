@@ -13,7 +13,7 @@ internal sealed class OverlayController : IDisposable
     private readonly DispatcherTimer _statusTimer;
     private readonly CancellationTokenSource _cts = new();
 
-    private AutoSnapshot _snapshot = new(false, false, "Connecting to Jev Router…", null);
+    private AutoSnapshot _snapshot = new(false, false, "Connecting to Jev Router…", null, null);
     private bool _busy;
 
     public OverlayController(Dispatcher dispatcher)
@@ -77,7 +77,7 @@ internal sealed class OverlayController : IDisposable
         }
         catch (Exception ex)
         {
-            _snapshot = new AutoSnapshot(false, false, ex.GetType().Name, null);
+            _snapshot = new AutoSnapshot(false, false, ex.GetType().Name, null, null);
         }
 
         _overlay.SetState(_snapshot, _busy);
@@ -103,6 +103,7 @@ internal sealed class OverlayController : IDisposable
                 _snapshot.Auto,
                 false,
                 $"{ex.GetType().Name}: {ex.Message}",
+                _snapshot.RedirectModel,
                 _snapshot.Route);
         }
         finally
