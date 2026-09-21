@@ -58,6 +58,8 @@ function Test-ModelRouter([string[]]$Arguments) {
 $RepoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $RouterDir = Resolve-RouterDir $RouterDir
 $script:ModelRouter = Join-Path $RouterDir "model-router.ps1"
+$discoveryMode = Join-Path $RouterDir "src\discovery-mode.mjs"
+$routerService = Join-Path $RouterDir "src\service.mjs"
 $curate = Join-Path $RouterDir "src\curate-models.mjs"
 $installService = Join-Path $RepoRoot "server\install-service.ps1"
 $installToggle = Join-Path $RepoRoot "server\install-toggle.ps1"
@@ -90,6 +92,29 @@ Write-Host "== 1/10  Codex Router =="
 if (-not (Test-ModelRouter @("codex", "status"))) {
   throw "Codex Router is not installed/running from $RouterDir. Install it with .\install.ps1 -Target codex -Guided -WithTray, then rerun this script."
 }
+
+# This integration intentionally reuses the user's local Codex ChatGPT login.
+# Upstream's discovery-disabled mode promises not to read that session at all,
+# so it cannot coexist with chatgpt-session sharing. Enable discovery only for
+# this local router state, and restart the service if we changed that setting.
+$discovery = $null
+try {
+  $discovery = (& node.exe $discoveryMode status | Select-Object -Last 1 | ConvertFrom-Json).discovery
+} catch {
+  throw "Could not read Codex Router credential-discovery mode: $($_.Exception.Message)"
+}
+if ($discovery -ne "enabled") {
+  Write-Host "Enabling Codex credential discovery required for ChatGPT session sharing."
+  & node.exe $discoveryMode set enabled
+  if ($LASTEXITCODE -ne 0) {
+    throw "Could not enable Codex Router credential discovery."
+  }
+  & node.exe $routerService restart
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex Router could not restart after enabling credential discovery."
+  }
+}
+
 Invoke-ModelRouter @("codex", "doctor")
 
 Write-Host "== 2/10  Codex ChatGPT session =="
