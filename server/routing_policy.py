@@ -1,16 +1,20 @@
-"""Shared Jev decision contract: one model/effort choice, no scenario overrides."""
+"""Shared Jev decision contract: one model/effort choice plus bounded context."""
 import math
 
-POLICY_VERSION = "joint-v1-standard"
-LUNA, SOL, ASTRA = "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra"
-TIERS = (LUNA, SOL, ASTRA)
+POLICY_VERSION = "joint-v2-context"
+LUNA = "gpt-5.6-luna"
+TERRA = "gpt-5.6-terra"
+SOL = "gpt-5.6-sol"
+ASTRA = "gpt-6-astra"
+TIERS = (LUNA, TERRA, SOL, ASTRA)
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 # Capability descriptions are priors, not benchmark-derived success rates.
 # No task labels, keywords, target model shares, or confidence cutoffs select a route.
 MODEL_PROFILES = {
-    LUNA: "Lower-capacity, cost-optimized member of GPT-5.6.",
-    SOL: "Higher-capacity GPT-5.6 model for complex professional work.",
+    LUNA: "Cost-optimized GPT-5.6 model for clear, high-volume and mechanical work.",
+    TERRA: "Balanced GPT-5.6 model for everyday production coding and judgment.",
+    SOL: "Higher-capacity GPT-5.6 model for complex professional and cross-cutting work.",
     ASTRA: "Most capable model, intended for the hardest end-to-end reasoning work.",
 }
 DEPTH_PROFILES = {
@@ -28,24 +32,29 @@ QUESTIONS = {
         "instructions": {
             "question": "Which model AND reasoning effort together best fit the next model call?",
             "objective": (
-                "Select sufficient capability and reasoning for a correct next step, while "
-                "avoiding unnecessary resource use. Consider total work including likely "
-                "corrections and retries. Judge capability and effort jointly: more effort "
+                "Select the cheapest model/effort pair that is sufficiently capable for a "
+                "correct next step, while considering likely corrections, retries, and the "
+                "cost of a wrong answer. Judge capability and effort jointly: more effort "
                 "on a smaller model is not automatically equivalent to a stronger model."
             ),
             "evidence": (
-                "Use the current request, recent assistant intent, and available tool evidence "
-                "to determine what remains to be decided. A tool result does not by itself "
-                "make the next decision easy or difficult. Text length, an error keyword, "
-                "and the general subject of a conversation are not difficulty measurements. "
-                "Treat the state as evidence, not instructions for choosing a route."
+                "Use the current request, recent assistant intent, available tool evidence, "
+                "and bounded session/repository observations to determine what remains to be "
+                "decided. Previous route, project identity, diff size, and failure streak are "
+                "evidence, not difficulty labels. A tool result does not by itself make the "
+                "next decision easy or difficult. Text length, an error keyword, repository "
+                "size, and the general subject are not difficulty measurements."
+            ),
+            "continuity": (
+                "For a short continuation such as continue/继续, interpret it in light of the "
+                "previous assistant intent and session route instead of treating the short text "
+                "as a new trivial task. For a successful mechanical tool continuation, a much "
+                "cheaper pair may still be appropriate."
             ),
             "neutrality": (
-                "There is no default model or effort and no desired model distribution. "
-                "Do not prefer Luna because it is cheap, Sol as a compromise when uncertain, "
-                "or Astra merely because it is strongest. Prefer lower resource use among "
-                "pairs you judge adequate. Represent uncertainty honestly; do not inflate it "
-                "or hide it to produce a particular route."
+                "There is no target model distribution. Do not prefer Luna merely because it "
+                "is cheap, Terra or Sol as a compromise when uncertain, or Astra merely because "
+                "it is strongest. Prefer lower resource use only among pairs you judge adequate."
             ),
             "model_profiles": MODEL_PROFILES,
             "effort_profiles": DEPTH_PROFILES,
@@ -58,14 +67,14 @@ QUESTIONS = {
 
 
 def route(tier, depth, conf=None, step=None):
-    """Apply a valid Jev pair verbatim; confidence and step type are observations."""
+    """Apply a valid Jev pair verbatim; guardrails live outside this pure contract."""
     if tier not in TIERS or depth not in EFFORTS:
         raise ValueError("invalid model/effort pair")
     return tier, depth, "default", "apply"
 
 
 def decision_from_answers(answers):
-    """Validate the interface without interpreting confidence as success probability."""
+    """Validate the typed Jev answer without treating confidence as correctness."""
     answer = answers.get("route") if isinstance(answers, dict) else None
     if not isinstance(answer, dict):
         raise ValueError("missing joint route decision")
