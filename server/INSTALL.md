@@ -15,17 +15,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
   -RouterDir "C:\absolute\path\to\codex-router"
 ```
 
-The Windows installer registers two per-user Scheduled Tasks:
+The Windows installer registers three per-user Scheduled Tasks:
 
 - `Jev Codex Router`: hidden background service, starts at logon and has a
-  one-minute heartbeat with `IgnoreNew` to recover from crashes without
-  spawning duplicates.
+  one-minute heartbeat with `IgnoreNew`.
 - `Jev Codex Router Shadow Eval`: daily 03:15 rolling 7-day report with
   `StartWhenAvailable`.
+- `Jev Codex Auto Toggle`: a small WPF/UIAutomation overlay anchored beside
+  Codex's native reasoning control.
 
-It then registers the loopback generic Responses provider, discovers
-`jev/auto`, curates all five effort levels, applies the router overlay and runs
-the full readiness check.
+It then registers the loopback generic Responses provider, discovers/curates
+`jev/auto`, enables Codex Router signed routing, and leaves Codex's native
+model + reasoning picker as the manual UI. The Auto button only changes Codex
+Router's `native-redirect`: OFF restores the previous redirect (normally
+native ChatGPT), ON sends native GPT calls to `jev/auto`.
 
 ### macOS
 
@@ -43,8 +46,10 @@ bash setup-local.sh /absolute/path/to/codex-router
 | Shadow report now | `py -3 server\report_shadow_eval.py --days 7 --write` |
 | Service status | `Get-ScheduledTask -TaskName "Jev Codex Router"` |
 | Eval status | `Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"` |
+| Auto toggle status | `Get-ScheduledTask -TaskName "Jev Codex Auto Toggle"` |
+| Auto router status | `Invoke-RestMethod http://127.0.0.1:4319/control/status` |
 | Restart service | `Stop-ScheduledTask -TaskName "Jev Codex Router"; Start-ScheduledTask -TaskName "Jev Codex Router"` |
-| Uninstall both tasks | `.\server\uninstall-service.ps1` |
+| Uninstall all Jev tasks | `.\server\uninstall-service.ps1` |
 
 ### macOS
 
@@ -54,6 +59,31 @@ bash setup-local.sh /absolute/path/to/codex-router
 | Readiness check | `python3 server/jev_server.py --check` |
 | Install launchd | `bash server/install-service.sh` |
 | Service status | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` |
+
+## Auto toggle behavior
+
+The overlay does not change Codex's picker and does not simulate clicks.
+
+- Auto OFF: Jev Auto is off. If there was no pre-existing Codex Router native
+  redirect, the native model and reasoning effort selected in Codex apply.
+- Auto ON: Codex Router sets `native-redirect=jev/auto`; Jev chooses the
+  model/effort pair independently on each Responses call.
+- Auto OFF after that restores the native redirect that existed immediately
+  before Auto was enabled.
+- If some other operator changes the native redirect while Auto is on, disabling
+  Auto will not overwrite that newer choice.
+- Native redirect is router-wide for native GPT traffic. Background native GPT
+  turns that reach the router are also redirected while Auto is on.
+
+The local control API is:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:4319/control/status
+
+Invoke-RestMethod http://127.0.0.1:4319/control/auto \
+  -Method Post -ContentType "application/json" \
+  -Body (@{ enabled = $true } | ConvertTo-Json -Compress)
+```
 
 ## Key setup
 
@@ -79,6 +109,9 @@ To use another file, set `JEV_ENV_FILE=/path/to/env` when running
 `server/install-service.sh`; the installer persists only that path in the
 launchd plist, never the key itself.
 
+The Windows Auto overlay also needs the .NET 8 SDK during installation; it is
+published self-contained after setup.
+
 Run `py -3 server\jev_server.py --check` on Windows or
 `python3 server/jev_server.py --check` on macOS at any time. It checks the key,
 TypeSafe API reachability, the protected Codex Router caller secret, the router
@@ -98,6 +131,17 @@ touch them. Verify anyway:
 5. If needed: `./bin/model-router codex refresh-catalog` and `./bin/control service restart`, then fully restart Codex.
 
 ## Troubleshooting
+
+- **Auto button does not appear**: verify
+  `Get-ScheduledTask -TaskName "Jev Codex Auto Toggle"`, then verify
+  `Invoke-RestMethod http://127.0.0.1:4319/control/status`. If both work,
+  Codex may have changed the UIAutomation name/layout of its reasoning control;
+  the overlay intentionally hides rather than attaching to an uncertain target.
+- **Auto is green but a native picker choice seems ignored**: this is expected.
+  While Auto is ON, native GPT traffic is redirected to `jev/auto`. Turn Auto
+  OFF before using Codex's native model/reasoning selection manually.
+- **Auto says unavailable**: the Jev service needs the Codex Router checkout
+  path in `CODEX_ROUTER_DIR`; rerun `setup-local.ps1 -RouterDir ...`.
 
 - **`invalid_responses_response` in router logs / “unavailable right now” in
   Codex**: the API forwarder parsed our reply as JSON instead of SSE. The server
