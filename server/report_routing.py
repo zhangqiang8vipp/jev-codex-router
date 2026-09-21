@@ -63,7 +63,7 @@ import sys
 LIVE_LOG = os.path.expanduser("~/.codex/codex-router/jev-router-live.jsonl")
 BACKTEST_STATE = os.path.expanduser("~/.codex/codex-router/jev-backtest.json")
 
-LUNA, SOL, ASTRA = "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra"
+LUNA, TERRA, SOL, ASTRA = "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"
 
 # Prices per 1M tokens (input, output, cached input, cache write), short context,
 # Sep 2026 — kept identical to poc/backtest_savings.py so the two tools agree.
@@ -86,6 +86,7 @@ MIX = {"input": 2_886_560, "cached": 2_836_607, "output": 6_819}
 # reported under its own leaf name.
 SHORT = {
     LUNA: "luna",
+    TERRA: "terra",
     SOL: "sol",
     ASTRA: "astra",
     "opencode-go/deepseek-v4.1-flash": "tandem",
@@ -99,8 +100,12 @@ CONF_GATE = 0.5  # historical diagnostics only; joint routing has no confidence 
 # Standard ChatGPT credit rates, 2026-09-20:
 # https://learn.chatgpt.com/docs/pricing
 # (input, cached input, output) per million tokens. Reasoning is part of output.
-CREDIT_RATES = {LUNA: (5.0, 0.5, 30.0), SOL: (100.0, 10.0, 500.0),
-                ASTRA: (250.0, 25.0, 1250.0)}
+CREDIT_RATES = {
+    LUNA: (5.0, 0.5, 30.0),
+    TERRA: (50.0, 5.0, 300.0),
+    SOL: (100.0, 10.0, 500.0),
+    ASTRA: (250.0, 25.0, 1250.0),
+}
 
 
 def token_credits(model, usage):
@@ -172,7 +177,7 @@ def turn_cost(model, mix=None, speed="default"):
         return None
     mix = mix or MIX
     p_in, p_out, p_cached, p_write = PRICES[key]
-    if key in (LUNA, SOL, ASTRA, "gpt-5.6-terra") and speed in ("priority", "fast"):
+    if key in (LUNA, TERRA, SOL, ASTRA) and speed in ("priority", "fast"):
         p_in, p_out, p_cached, p_write = (p_in * API_FAST_X, p_out * API_FAST_X,
                                         p_cached * API_FAST_X, p_write * API_FAST_X)
     cached = min(mix["cached"], mix["input"])
