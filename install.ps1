@@ -249,14 +249,21 @@ function Install-SourceTree([string]$Destination) {
 
     Stop-ExistingJevTasks
 
-    if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Recurse -Force }
-    if (Test-Path -LiteralPath $Destination) { Move-Item -LiteralPath $Destination -Destination $backupPath }
-
     try {
+      if (Test-Path -LiteralPath $backupPath) {
+        Remove-Item -LiteralPath $backupPath -Recurse -Force
+      }
+      if (Test-Path -LiteralPath $Destination) {
+        Move-Item -LiteralPath $Destination -Destination $backupPath
+      }
       Move-Item -LiteralPath $source.FullName -Destination $Destination
     } catch {
-      if ((-not (Test-Path -LiteralPath $Destination)) -and (Test-Path -LiteralPath $backupPath)) {
-        Move-Item -LiteralPath $backupPath -Destination $Destination
+      try {
+        if ((-not (Test-Path -LiteralPath $Destination)) -and (Test-Path -LiteralPath $backupPath)) {
+          Move-Item -LiteralPath $backupPath -Destination $Destination
+        }
+      } finally {
+        Start-ExistingJevTasks
       }
       throw
     }
