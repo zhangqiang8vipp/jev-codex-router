@@ -45,37 +45,60 @@ class InstallationCheck(unittest.TestCase):
     class FakeResponse:
         status = 200
 
+        def __init__(self, body):
+            self.body = body
+
         def read(self, _size=None):
-            return b'{"ok":true}'
+            return self.body
 
     class FakeConnection:
         def __init__(self, *_args, **_kwargs):
-            pass
+            self.path = ""
 
-        def request(self, *_args, **_kwargs):
-            pass
+        def request(self, _method, path, **_kwargs):
+            self.path = path
 
         def getresponse(self):
-            return InstallationCheck.FakeResponse()
+            if "/_codex-router/" in self.path and self.path.endswith("/v1/models"):
+                body = json.dumps({"data": [{"id": jev.VIRTUAL_MODEL_SLUG}]}).encode()
+            else:
+                body = b'{"ok":true}'
+            return InstallationCheck.FakeResponse(body)
 
         def close(self):
             pass
 
-    def test_check_verifies_dependencies_without_exposing_secrets(self):
-        with mock.patch.object(jev, "load_key", return_value="typesafe-secret"), \
-             mock.patch.object(jev, "call_jev_routed",
-                               return_value={"answers": {"ready": {"probability": 1.0}}}), \
-             mock.patch.object(jev, "caller_secret", return_value="caller-secret"), \
-             mock.patch.object(jev.http.client, "HTTPConnection", self.FakeConnection):
-            result = jev.installation_check()
+    def dependencies(self):
+        return (
+            mock.patch.object(jev, "load_key", return_value="typesafe-secret"),
+            mock.patch.object(
+                jev,
+                "call_jev_routed",
+                return_value={"answers": {"ready": {"probability": 1.0}}},
+            ),
+            mock.patch.object(jev, "caller_secret", return_value="caller-secret"),
+            mock.patch.object(jev.http.client, "HTTPConnection", self.FakeConnection),
+        )
+
+    def test_check_verifies_dependencies_and_loaded_model_without_exposing_secrets(self):
+        patches = self.dependencies()
+        with patches[0], patches[1], patches[2], patches[3]:
+            result = jev.installation_check(require_model=True)
         self.assertTrue(result["ok"])
         encoded = json.dumps(result)
         self.assertNotIn("typesafe-secret", encoded)
         self.assertNotIn("caller-secret", encoded)
         self.assertEqual(
             [item["name"] for item in result["checks"]],
-            ["typesafe_key", "typesafe_api", "caller_secret", "codex_router"],
+            ["typesafe_key", "typesafe_api", "caller_secret", "codex_router", "jev_model"],
         )
+
+    def test_core_check_does_not_require_curated_model(self):
+        patches = self.dependencies()
+        with patches[0], patches[1], patches[2], patches[3]:
+            result = jev.installation_check(require_model=False)
+        self.assertTrue(result["ok"])
+        self.assertNotIn("jev_model", [item["name"] for item in result["checks"]])
 
 
 class ResponseIdContinuity(unittest.TestCase):
