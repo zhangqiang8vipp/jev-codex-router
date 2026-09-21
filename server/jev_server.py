@@ -70,7 +70,8 @@ from auto_control import set_enabled as set_auto_enabled
 from auto_control import status as auto_status
 from route_lease import (RouteLeaseLocks, apply_failure_escalation,
                          contains_compaction, human_turn_key, lease_fields,
-                         read_lease, route_action, tool_step_key)
+                         read_lease, route_action, served_continuity_fields,
+                         tool_step_key)
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
                             TERRA, TIERS, decision_from_answers, route)
 from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
@@ -1901,20 +1902,19 @@ class Handler(BaseHTTPRequestHandler):
                 with ROUTE_LEASE_LOCKS.hold(thread_key):
                     latest_session = SESSION_STORE.get(thread_key)
                     latest_lease = read_lease(latest_session, POLICY_VERSION)
-                    if (latest_lease is not None
-                            and latest_lease.turn_key == turn_key
-                            and (latest_lease.model, latest_lease.effort) != (model, effort)):
+                    served_fields = served_continuity_fields(
+                        latest_lease,
+                        served_model=model,
+                        served_effort=effort,
+                        turn_key=turn_key,
+                        policy_version=POLICY_VERSION,
+                    )
+                    if served_fields is not None:
                         SESSION_STORE.put(
                             thread_key,
                             last_model=model,
                             last_effort=effort,
-                            **lease_fields(
-                                model,
-                                effort,
-                                turn_key=latest_lease.turn_key,
-                                source="served_continuity",
-                                policy_version=POLICY_VERSION,
-                            ),
+                            **served_fields,
                         )
                         lease_synced_to_served = True
         total_ms = int((time.time() - t0) * 1000)
