@@ -130,6 +130,9 @@ def summarize(turns, feedback, stats, days, min_turns):
     transitions = {}
     route_changes = retry_turns = immediate_failures = 0
     tool_feedback_turns = tool_errors = 0
+    route_sources = {}
+    lease_reuse_turns = jev_decision_turns = jev_attempt_turns = 0
+    jev_paid_call_turns = 0
     total_input = total_cached = 0
     latency = []
     actual_credit_total = 0.0
@@ -140,6 +143,17 @@ def summarize(turns, feedback, stats, days, min_turns):
         smart = pair(event.get("smart_route"))
         raw = pair(event.get("jev_route"))
         served = pair(event.get("served_route"))
+        route_source = event.get("route_source")
+        route_source = route_source if isinstance(route_source, str) and route_source else "legacy"
+        route_sources[route_source] = route_sources.get(route_source, 0) + 1
+        if route_source in ("lease", "lease_escalation"):
+            lease_reuse_turns += 1
+        if route_source == "jev":
+            jev_decision_turns += 1
+        if route_source in ("jev", "jev_error_fallback"):
+            jev_attempt_turns += 1
+        if event.get("jev_cache") == "miss":
+            jev_paid_call_turns += 1
         if event.get("route_changed"):
             route_changes += 1
         if (event.get("retry_count") or 0) > 0:
@@ -313,12 +327,18 @@ def summarize(turns, feedback, stats, days, min_turns):
         observed_span_days = 0.0
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "window_days": days,
         "observed_span_days": round(observed_span_days, 3),
         "warmup_complete": observed_span_days >= min(7, days) - 0.05,
         "turns": total,
+        "route_sources": dict(sorted(route_sources.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "lease_reuse_turns": lease_reuse_turns,
+        "lease_reuse_rate": round(lease_reuse_turns / total, 4) if total else None,
+        "jev_decision_turns": jev_decision_turns,
+        "jev_attempt_turns": jev_attempt_turns,
+        "jev_paid_call_turns": jev_paid_call_turns,
         "route_changes": route_changes,
         "route_change_rate": round(route_changes / total, 4) if total else None,
         "immediate_failures": immediate_failures,
@@ -370,6 +390,9 @@ def render_text(report):
     lines += [
         "",
         "Overall",
+        f"  lease reuse: {report['lease_reuse_turns']} ({pct(report['lease_reuse_rate'])})",
+        f"  Jev decisions: {report['jev_decision_turns']} · attempts: {report['jev_attempt_turns']} · paid misses: {report['jev_paid_call_turns']}",
+        f"  route sources: {report['route_sources']}",
         f"  route changed: {report['route_changes']} ({pct(report['route_change_rate'])})",
         f"  immediate failures: {report['immediate_failures']} ({pct(report['immediate_failure_rate'])})",
         f"  tool errors: {report['tool_errors']}/{report['tool_feedback_turns']} ({pct(report['tool_error_rate'])})",
