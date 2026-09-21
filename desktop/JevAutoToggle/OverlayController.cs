@@ -15,6 +15,7 @@ internal sealed class OverlayController : IDisposable
 
     private AutoSnapshot _snapshot = new(false, false, "Connecting to Jev Router…", null, null);
     private bool _busy;
+    private bool _statusInFlight;
 
     public OverlayController(Dispatcher dispatcher)
     {
@@ -66,7 +67,8 @@ internal sealed class OverlayController : IDisposable
 
     private async Task RefreshStatusAsync()
     {
-        if (_busy || _cts.IsCancellationRequested) return;
+        if (_busy || _statusInFlight || _cts.IsCancellationRequested) return;
+        _statusInFlight = true;
         try
         {
             _snapshot = await _router.GetStatusAsync(_cts.Token);
@@ -78,6 +80,10 @@ internal sealed class OverlayController : IDisposable
         catch (Exception ex)
         {
             _snapshot = new AutoSnapshot(false, false, ex.GetType().Name, null, null);
+        }
+        finally
+        {
+            _statusInFlight = false;
         }
 
         _overlay.SetState(_snapshot, _busy);
