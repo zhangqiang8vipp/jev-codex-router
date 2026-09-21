@@ -91,12 +91,12 @@ else
 fi
 
 echo ""
-echo "Running end-to-end readiness checks (TypeSafe + caller secret + Codex Router)..."
-"$PYTHON" "$REPO/server/jev_server.py" --check || {
+echo "Running bootstrap readiness checks (TypeSafe + caller secret + Codex Router)..."
+"$PYTHON" "$REPO/server/jev_server.py" --check-core || {
   echo ""
-  echo "Service is installed, but one or more prerequisites are not ready."
+  echo "Service is installed, but one or more bootstrap prerequisites are not ready."
   echo "Fix the failed check above, then run:"
-  echo "  $PYTHON $REPO/server/jev_server.py --check"
+  echo "  $PYTHON $REPO/server/jev_server.py --check-core"
   exit 1
 }
 
