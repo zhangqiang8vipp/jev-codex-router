@@ -41,6 +41,43 @@ class KeyLoading(unittest.TestCase):
                 self.assertEqual(jev.load_key(), "process-secret")
 
 
+class InstallationCheck(unittest.TestCase):
+    class FakeResponse:
+        status = 200
+
+        def read(self, _size=None):
+            return b'{"ok":true}'
+
+    class FakeConnection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return InstallationCheck.FakeResponse()
+
+        def close(self):
+            pass
+
+    def test_check_verifies_dependencies_without_exposing_secrets(self):
+        with mock.patch.object(jev, "load_key", return_value="typesafe-secret"), \
+             mock.patch.object(jev, "call_jev_routed",
+                               return_value={"answers": {"ready": {"probability": 1.0}}}), \
+             mock.patch.object(jev, "caller_secret", return_value="caller-secret"), \
+             mock.patch.object(jev.http.client, "HTTPConnection", self.FakeConnection):
+            result = jev.installation_check()
+        self.assertTrue(result["ok"])
+        encoded = json.dumps(result)
+        self.assertNotIn("typesafe-secret", encoded)
+        self.assertNotIn("caller-secret", encoded)
+        self.assertEqual(
+            [item["name"] for item in result["checks"]],
+            ["typesafe_key", "typesafe_api", "caller_secret", "codex_router"],
+        )
+
+
 class ResponseIdContinuity(unittest.TestCase):
     """One response id per relayed stream, however many gateways touched it.
 
