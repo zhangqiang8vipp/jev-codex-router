@@ -272,23 +272,39 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 ### Windows (recommended for this fork)
 
 Prerequisites: Windows 10/11, Codex Desktop or CLI signed in with ChatGPT,
-PowerShell in FullLanguage mode, Python 3.11+, Node.js, the .NET 8 SDK, a current
-[Codex Router](https://github.com/duolahypercho/codex-router) checkout, and a
-TypeSafe API key for Jev.
+PowerShell in FullLanguage mode, and a current
+[Codex Router](https://github.com/duolahypercho/codex-router) checkout.
+The bootstrap can install missing Node.js, Python 3 and .NET 8 SDK through
+`winget` after asking first. If the TypeSafe/Jev key is not already stored, it
+prompts for it locally with hidden input.
 
-Store the key locally; do not put it in command arguments:
-
-```powershell
-New-Item -ItemType Directory -Force (Join-Path $HOME ".hermes") | Out-Null
-Set-Content -Path (Join-Path $HOME ".hermes\.env") -Value "TYPESAFE_API_KEY=YOUR_KEY"
-```
-
-Then run the one-command setup from this repository:
+Recommended install/update command:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 -RouterDir "C:\absolute\path\to\codex-router"
+irm https://raw.githubusercontent.com/zhangqiang8vipp/jev-codex-router/main/install.ps1 | iex
 ```
 
+This is the PowerShell equivalent of `curl ... | sh`: it downloads the latest
+`main` source into `%LOCALAPPDATA%\JevCodexRouter\source`, finds the local
+Codex Router checkout, installs/updates the Jev service and Auto overlay, and
+runs the readiness checks. Re-running the same command upgrades the tool.
+
+If Codex Router is in a non-standard folder, set it before the same command:
+
+```powershell
+$env:CODEX_ROUTER_DIR = "C:\absolute\path\to\codex-router"
+irm https://raw.githubusercontent.com/zhangqiang8vipp/jev-codex-router/main/install.ps1 | iex
+```
+
+For users who prefer not to pipe remote code directly into PowerShell:
+
+```powershell
+$p = Join-Path $env:TEMP "jev-install.ps1"
+irm https://raw.githubusercontent.com/zhangqiang8vipp/jev-codex-router/main/install.ps1 -OutFile $p
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p
+```
+
+The lower-level `setup-local.ps1` remains available for development checkouts.
 The Windows setup is idempotent. It verifies Codex Router and the shared ChatGPT
 session, creates/updates the loopback `jev` generic Responses provider,
 installs Jev as a hidden per-user Scheduled Task, registers the daily rolling
@@ -312,10 +328,10 @@ Invoke-RestMethod http://127.0.0.1:4319/control/status
 Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"
 ```
 
-To remove only this project's background tasks:
+To remove this project's background tasks after bootstrap installation:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\server\uninstall-service.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\JevCodexRouter\source\server\uninstall-service.ps1"
 ```
 
 ### macOS
