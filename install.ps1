@@ -95,23 +95,64 @@ function Test-PythonOpenSsl([string]$Python) {
   }
 }
 
-function Prepare-CodexRouterVenv([string]$Directory) {
+function Get-CodexRouterLogPath {
+  return Join-Path $HOME ".codex\codex-router\router.log"
+}
+
+function Test-HistoricalOpenSslCrash {
+  $log = Get-CodexRouterLogPath
+  return (
+    (Test-Path -LiteralPath $log -PathType Leaf) -and
+    (Select-String -LiteralPath $log -Pattern "no OPENSSL_Applink" -Quiet)
+  )
+}
+
+function Get-FileLength([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [int64]0 }
+  try { return [int64](Get-Item -LiteralPath $Path).Length } catch { return [int64]0 }
+}
+
+function Get-AppendedUtf8Text([string]$Path, [int64]$Offset) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+  try {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($Offset -lt 0 -or $Offset -ge $bytes.LongLength) {
+      if ($Offset -ge $bytes.LongLength) { return "" }
+      $Offset = 0
+    }
+    $count = [int]($bytes.LongLength - $Offset)
+    return [Text.Encoding]::UTF8.GetString($bytes, [int]$Offset, $count)
+  } catch {
+    return ""
+  }
+}
+
+function Prepare-CodexRouterVenv([string]$Directory, [switch]$ForceRebuild) {
   $venv = Join-Path $Directory ".venv"
   $venvPython = Join-Path $venv "Scripts\python.exe"
 
-  if ((Test-Path -LiteralPath $venvPython -PathType Leaf) -and (Test-PythonOpenSsl $venvPython)) {
-    return
+  if (
+    -not $ForceRebuild -and
+    (Test-Path -LiteralPath $venvPython -PathType Leaf) -and
+    (Test-PythonOpenSsl $venvPython)
+  ) {
+    return $false
   }
 
   $systemPython = Resolve-SystemPython
   if (-not (Test-PythonOpenSsl $systemPython)) {
     throw @"
-The system Python runtime also failed its OpenSSL self-test.
+The system Python runtime failed its OpenSSL self-test.
 Check for SSLKEYLOGFILE or conflicting OpenSSL DLLs on PATH before retrying.
 "@
   }
 
-  Write-Step "Creating Codex Router venv with system Python (avoids uv-managed OpenSSL conflicts)"
+  if ($ForceRebuild) {
+    Write-Step "Repairing Codex Router venv after a recorded OPENSSL_Applink crash"
+  } else {
+    Write-Step "Creating Codex Router venv with system Python"
+  }
+
   if (Test-Path -LiteralPath $venv) {
     Remove-Item -LiteralPath $venv -Recurse -Force
   }
@@ -119,6 +160,57 @@ Check for SSLKEYLOGFILE or conflicting OpenSSL DLLs on PATH before retrying.
   & $systemPython -m venv $venv
   if ($LASTEXITCODE -ne 0 -or -not (Test-PythonOpenSsl $venvPython)) {
     throw "System Python could not create a working Codex Router virtual environment."
+  }
+
+  return $true
+}
+
+function Prepare-And-VerifyCodexRouterPython([string]$Directory, [bool]$ForceRepair) {
+  $rebuilt = Prepare-CodexRouterVenv $Directory -ForceRebuild:$ForceRepair
+  if (-not $rebuilt) { return }
+
+  Write-Step "Installing locked Codex Router Python dependencies"
+  $routerInstall = Join-Path $Directory "install.ps1"
+  $prepareArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", $routerInstall,
+    "-CheckoutInstall",
+    "-PrepareOnly",
+    "-ForceDeps",
+    "-Target", "codex"
+  )
+  & powershell.exe @prepareArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex Router dependency preparation failed."
+  }
+
+  $venv = Join-Path $Directory ".venv"
+  $venvPython = Join-Path $venv "Scripts\python.exe"
+  $verify = Join-Path $Directory "scripts\verify-python-lock.py"
+  if (-not (Test-Path -LiteralPath $verify -PathType Leaf)) {
+    throw "Codex Router Python verification script is missing: $verify"
+  }
+
+  $requirementsJson = & node.exe -e "import('./src/install-plan.mjs').then(m=>process.stdout.write(JSON.stringify(m.PYTHON_REQUIREMENTS)))" 2>$null
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($requirementsJson)) {
+    throw "Could not read Codex Router's pinned Python requirements."
+  }
+  $requirements = @($requirementsJson | ConvertFrom-Json)
+  $verifyArgs = @($verify, "--venv", $venv, "--proxy-timeout", "90")
+  foreach ($requirement in $requirements) {
+    $verifyArgs += @("--requirement", [string]$requirement)
+  }
+
+  Write-Step "Smoke-testing LiteLLM before registering the Windows task"
+  Push-Location $Directory
+  try {
+    & $venvPython @verifyArgs
+    if ($LASTEXITCODE -ne 0) {
+      throw "LiteLLM smoke test failed before service installation."
+    }
+  } finally {
+    Pop-Location
   }
 }
 
@@ -184,14 +276,17 @@ function Install-CodexRouterCheckout {
 }
 
 function Ensure-CodexRouterBaseInstalled([string]$Directory) {
-  Prepare-CodexRouterVenv $Directory
+  $forceOpenSslRepair = Test-HistoricalOpenSslCrash
+  Prepare-And-VerifyCodexRouterPython $Directory $forceOpenSslRepair
 
-  # Install the upstream router in credential-free idle mode. The pre-created
-  # venv pins it to system CPython; if uv is installed, upstream may still use
-  # uv pip to install locked wheels into that venv, but it no longer chooses
-  # the Python runtime.
+  # Install the upstream router in credential-free idle mode. When an old
+  # OPENSSL_Applink crash was present, the venv has already been rebuilt and
+  # the LiteLLM proxy has been boot-tested above.
   Write-Step "Installing/repairing the Codex Router base service"
   $routerInstall = Join-Path $Directory "install.ps1"
+  $log = Get-CodexRouterLogPath
+  $logOffset = Get-FileLength $log
+
   $routerInstallArgs = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
@@ -204,12 +299,11 @@ function Ensure-CodexRouterBaseInstalled([string]$Directory) {
   & powershell.exe @routerInstallArgs
 
   if ($LASTEXITCODE -ne 0) {
-    $log = Join-Path $HOME ".codex\codex-router\router.log"
-    if ((Test-Path -LiteralPath $log -PathType Leaf) -and
-        (Select-String -LiteralPath $log -Pattern "no OPENSSL_Applink" -Quiet)) {
-      throw "Codex Router LiteLLM still hit the Windows OPENSSL_Applink failure after the system-Python repair."
+    $newLog = Get-AppendedUtf8Text $log $logOffset
+    if ($newLog -match "no OPENSSL_Applink") {
+      throw "This install attempt still hit OPENSSL_Applink after rebuilding and smoke-testing the system-Python venv."
     }
-    throw "Codex Router installer exited with status $LASTEXITCODE."
+    throw "Codex Router installer exited with status $LASTEXITCODE. The failure was not a new OPENSSL_Applink crash."
   }
 }
 
@@ -242,9 +336,7 @@ function Resolve-RouterCheckout([string]$Explicit) {
     (Join-Path $HOME "codex-router")
   )) {
     if (Test-RouterCheckout $candidate) {
-      $resolved = [IO.Path]::GetFullPath($candidate)
-      Prepare-CodexRouterVenv $resolved
-      return $resolved
+      return [IO.Path]::GetFullPath($candidate)
     }
   }
 
