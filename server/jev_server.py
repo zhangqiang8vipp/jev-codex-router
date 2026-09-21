@@ -81,6 +81,7 @@ from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
 HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".codex", "codex-router")
 ENV_PATH = os.path.join(HOME, ".hermes", ".env")
+LEGACY_ENV_PATH = os.path.join(HOME, ".jev.env")
 CALLER_SECRET_PATH = os.path.join(STATE, "caller-secret")
 OFF_PATH = os.path.join(STATE, "jev-router.off")
 SHADOW_PATH = os.path.join(STATE, "jev-router.shadow")
@@ -190,9 +191,23 @@ ENVELOPE_SCAN_CHARS = 200_000
 _log_lock = threading.Lock()
 
 
+def key_paths():
+    """Key files in precedence order; JEV_ENV_FILE is an explicit override."""
+    paths = []
+    override = os.environ.get("JEV_ENV_FILE", "").strip()
+    if override:
+        paths.append(os.path.realpath(os.path.expanduser(override)))
+    paths.extend((ENV_PATH, LEGACY_ENV_PATH))
+    out = []
+    for path in paths:
+        if path and path not in out:
+            out.append(path)
+    return tuple(out)
+
+
 def load_key():
-    """TYPESAFE_API_KEY: env files win (the process environment can be stale)."""
-    for path in (ENV_PATH, os.path.join(HOME, ".jev.env")):
+    """TYPESAFE_API_KEY: key files win; process env is a last resort."""
+    for path in key_paths():
         try:
             with open(path, encoding="utf-8") as fh:
                 for line in fh:
@@ -1398,16 +1413,122 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
 
 
-def main():
+CHECK_QUESTIONS = {
+    "ready": {
+        "type": "noul",
+        "instructions": "Does the state field named probe have the exact value ready?",
+    },
+}
+
+
+def installation_check():
+    """Return bounded readiness checks without ever exposing credentials."""
+    checks = []
+
+    key = load_key()
+    checks.append({
+        "name": "typesafe_key",
+        "ok": bool(key),
+        "detail": "configured" if key else "missing TYPESAFE_API_KEY",
+    })
+
+    if key:
+        started = time.time()
+        try:
+            answer = call_jev_routed(
+                key,
+                {"probe": "ready"},
+                CHECK_QUESTIONS,
+                timeout=6.0,
+            )
+            answers = answer.get("answers") if isinstance(answer, dict) else None
+            ok = isinstance(answers, dict) and "ready" in answers
+            checks.append({
+                "name": "typesafe_api",
+                "ok": ok,
+                "detail": f"reachable ({int((time.time() - started) * 1000)} ms)"
+                          if ok else "response missing typed answer",
+            })
+        except Exception as exc:
+            checks.append({
+                "name": "typesafe_api",
+                "ok": False,
+                "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+            })
+    else:
+        checks.append({"name": "typesafe_api", "ok": False, "detail": "skipped: key missing"})
+
+    try:
+        secret = caller_secret()
+        checks.append({
+            "name": "caller_secret",
+            "ok": bool(secret),
+            "detail": "present" if secret else "file is empty",
+        })
+    except OSError:
+        checks.append({
+            "name": "caller_secret",
+            "ok": False,
+            "detail": f"missing {CALLER_SECRET_PATH}",
+        })
+
+    conn = http.client.HTTPConnection(*ROUTER, timeout=3)
+    try:
+        conn.request("GET", "/health", headers={"Accept": "application/json"})
+        resp = conn.getresponse()
+        body = resp.read(2048)
+        checks.append({
+            "name": "codex_router",
+            "ok": resp.status == 200,
+            "detail": f"http {resp.status}" + ("" if resp.status == 200 else f": {body[:160].decode('utf-8', 'replace')}"),
+        })
+    except Exception as exc:
+        checks.append({
+            "name": "codex_router",
+            "ok": False,
+            "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+        })
+    finally:
+        conn.close()
+
+    return {
+        "ok": all(item["ok"] for item in checks),
+        "service": "jev-router",
+        "version": VERSION,
+        "policy_version": POLICY_VERSION,
+        "checks": checks,
+    }
+
+
+def print_installation_check(result):
+    for item in result["checks"]:
+        mark = "OK" if item["ok"] else "FAIL"
+        print(f"[{mark:4}] {item['name']}: {item['detail']}")
+    print("READY" if result["ok"] else "NOT READY")
+    return 0 if result["ok"] else 1
+
+
+def main(argv=None):
+    argv = list(argv if argv is not None else __import__("sys").argv[1:])
+    if argv == ["--check"]:
+        return print_installation_check(installation_check())
+    if argv:
+        print("usage: python3 server/jev_server.py [--check]", flush=True)
+        return 2
+
     server = ThreadingHTTPServer(LISTEN, Handler)
     server.daemon_threads = True
-    try:
-        os.chmod(LOG_PATH, 0o600)
-    except OSError:
-        pass
+    os.makedirs(STATE, exist_ok=True)
+    for path in (LOG_PATH, SESSION_PATH):
+        try:
+            if os.path.exists(path):
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
     print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
     server.serve_forever()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
