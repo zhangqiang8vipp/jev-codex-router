@@ -57,8 +57,7 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-if [ -n "${JEV_ENV_FILE:-}" ]; then
-  JEV_ENV_FILE="$JEV_ENV_FILE" "$PYTHON" - "$PLIST" <<'PY'
+"$PYTHON" - "$PLIST" <<'PY'
 import os
 import plistlib
 import sys
@@ -66,13 +65,28 @@ import sys
 path = sys.argv[1]
 with open(path, "rb") as fh:
     plist = plistlib.load(fh)
-plist["EnvironmentVariables"] = {
-    "JEV_ENV_FILE": os.path.realpath(os.path.expanduser(os.environ["JEV_ENV_FILE"]))
-}
+
+environment = {}
+jev_env_file = os.environ.get("JEV_ENV_FILE", "").strip()
+if jev_env_file:
+    environment["JEV_ENV_FILE"] = os.path.realpath(os.path.expanduser(jev_env_file))
+router_dir = os.environ.get("CODEX_ROUTER_DIR", "").strip()
+if router_dir:
+    environment["CODEX_ROUTER_DIR"] = os.path.realpath(os.path.expanduser(router_dir))
+state_dir = os.environ.get("CODEX_ROUTER_STATE_DIR", "").strip()
+if state_dir:
+    environment["CODEX_ROUTER_STATE_DIR"] = os.path.realpath(os.path.expanduser(state_dir))
+if os.environ.get("JEV_EXACT_NATIVE_ROUTE") == "1":
+    environment["JEV_EXACT_NATIVE_ROUTE"] = "1"
+
+if environment:
+    plist["EnvironmentVariables"] = environment
+else:
+    plist.pop("EnvironmentVariables", None)
+
 with open(path, "wb") as fh:
     plistlib.dump(plist, fh, sort_keys=False)
 PY
-fi
 
 # Replace any existing instance (watchdog / former label) with the service.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
