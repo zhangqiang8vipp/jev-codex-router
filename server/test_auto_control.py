@@ -73,6 +73,18 @@ class AutoControl(unittest.TestCase):
             self.assertEqual(control.read_redirect_model(state), "other/provider-model")
             self.assertFalse(os.path.exists(control.backup_path(state)))
 
+    def test_router_dir_can_be_recovered_from_durable_state(self):
+        with tempfile.TemporaryDirectory() as state, tempfile.TemporaryDirectory() as router:
+            source = os.path.join(router, "src")
+            os.makedirs(source)
+            script = os.path.join(source, "control.mjs")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write("// test\n")
+            with open(os.path.join(state, control.ROUTER_DIR_STATE_NAME), "w", encoding="utf-8") as fh:
+                fh.write(router + "\n")
+            with mock.patch.dict(os.environ, {"CODEX_ROUTER_DIR": "", "LOCALAPPDATA": ""}, clear=False):
+                self.assertEqual(control.resolve_control_script(None, state), script)
+
     def test_missing_router_dir_fails_closed_without_mutating_redirect(self):
         with tempfile.TemporaryDirectory() as state:
             self.write_redirect(state, "native/other")
