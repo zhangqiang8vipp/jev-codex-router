@@ -77,6 +77,8 @@ from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL
 from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
                            enrich_jev_state, extract_cwd, next_failure_streak,
                            session_key)
+from shadow_eval import (append_event as append_shadow_event,
+                         build_tool_feedback, build_turn_event, new_turn_id)
 
 HOME = os.path.expanduser("~")
 CODEX_HOME = os.path.realpath(os.path.expanduser(
@@ -93,6 +95,7 @@ DEBUG_PATH = os.path.join(STATE, "jev-router.debug")
 # removed from replayed history, including legacy trailing signatures.
 SIGNATURE_PATH = os.path.join(STATE, "jev-router.signature")
 LOG_PATH = os.path.join(STATE, "jev-router-live.jsonl")
+SHADOW_EVAL_PATH = os.path.join(STATE, "jev-shadow-eval.jsonl")
 SESSION_PATH = os.path.join(STATE, "jev-router-sessions.json")
 SESSION_STORE = SessionStore(SESSION_PATH)
 REPO_PROFILER = RepoProfiler()
@@ -116,7 +119,7 @@ ROUTER = ("127.0.0.1", _port_from_env(
     "MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", default=4202))
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.4"
+VERSION = "1.5"
 VIRTUAL_MODEL_ID = "auto"
 VIRTUAL_MODEL_SLUG = "jev/auto"
 VIRTUAL_CONTEXT_WINDOW = 1_050_000
@@ -1158,6 +1161,20 @@ class Handler(BaseHTTPRequestHandler):
         failure_streak = next_failure_streak(session, step)
         repo = REPO_PROFILER.snapshot(cwd)
         stream_requested = payload.get("stream") is True
+        turn_id = new_turn_id()
+        session_tag = thread_key[:16] if thread_key else None
+        previous_eval_id = session.get("last_eval_id")
+        if (step.get("step_type") == "tool_step"
+                and isinstance(previous_eval_id, str) and previous_eval_id):
+            append_shadow_event(
+                SHADOW_EVAL_PATH,
+                build_tool_feedback(
+                    at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    turn_id=previous_eval_id,
+                    session=session_tag,
+                    errored=bool(step.get("errored")),
+                ),
+            )
 
         tier = depth = conf = None
         jev_ms = None
@@ -1193,6 +1210,12 @@ class Handler(BaseHTTPRequestHandler):
                 jev_ms = int((time.time() - jt0) * 1000)
             else:
                 model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
+
+        # Capture the production smart route before operational shadow/dry
+        # overrides. The raw Jev route remains tier/depth above.
+        smart_model, smart_effort, smart_speed, smart_route_gate = (
+            model, effort, speed, gate
+        )
 
         # Remember only bounded routing state. Operational fail-open paths do
         # not overwrite the last healthy semantic route.
@@ -1291,8 +1314,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(unwritten)
 
+        finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        total_ms = int((time.time() - t0) * 1000)
         log_line({
-            "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "at": finished_at,
             "policy_version": POLICY_VERSION,
             "route_probabilities": decision["probabilities"] if decision else None,
             "chosen_probability": decision["chosen_probability"] if decision else None,
@@ -1310,7 +1335,7 @@ class Handler(BaseHTTPRequestHandler):
             "retried": retried,
             "fallback": fallback,
             "jev_ms": jev_ms,
-            "total_ms": int((time.time() - t0) * 1000),
+            "total_ms": total_ms,
             "status": status,
             "stream": stream_requested,
             "out": out_kind,
@@ -1328,6 +1353,31 @@ class Handler(BaseHTTPRequestHandler):
             "would": would,
             "task": task[:110],
         })
+        append_shadow_event(
+            SHADOW_EVAL_PATH,
+            build_turn_event(
+                at=finished_at,
+                turn_id=turn_id,
+                session=session_tag,
+                policy_version=POLICY_VERSION,
+                jev_model=tier,
+                jev_effort=depth,
+                smart_model=smart_model,
+                smart_effort=smart_effort,
+                smart_gate=smart_route_gate,
+                served_model=model,
+                served_effort=effort,
+                status=status,
+                attempts=self._attempts,
+                total_ms=total_ms,
+                jev_ms=jev_ms,
+                step_type=step["step_type"],
+                dry_reason=dry_reason,
+                fallback=fallback,
+            ),
+        )
+        if thread_key:
+            SESSION_STORE.put(thread_key, last_eval_id=turn_id)
 
     def _forward(self, payload, out_path, stream_requested, debug, marker, model, signature=None):
         """One relay attempt to the local caller edge, streamed straight back.
@@ -1594,7 +1644,7 @@ def main(argv=None):
     server = ThreadingHTTPServer(LISTEN, Handler)
     server.daemon_threads = True
     os.makedirs(STATE, exist_ok=True)
-    for path in (LOG_PATH, SESSION_PATH):
+    for path in (LOG_PATH, SHADOW_EVAL_PATH, SESSION_PATH):
         try:
             if os.path.exists(path):
                 os.chmod(path, 0o600)
