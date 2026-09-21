@@ -1557,7 +1557,7 @@ class Handler(BaseHTTPRequestHandler):
         turn_id = new_turn_id()
         session_tag = thread_key[:16] if thread_key else None
         turn_key = human_turn_key(payload, task=task, session_key=thread_key)
-        tool_key = tool_step_key(payload, session_key=thread_key)
+        tool_key = tool_step_key(payload, digest=step.get("digest") or "", session_key=thread_key)
         compacted = contains_compaction(payload)
         meaningful_user_turn = (
             step.get("step_type") == "user_turn"
