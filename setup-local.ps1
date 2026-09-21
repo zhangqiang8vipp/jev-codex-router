@@ -85,28 +85,70 @@ function Get-GenericProviders {
   }
 }
 
-function Wait-JevProviderDiscovery([int]$Attempts = 6) {
+function Test-JevCatalog {
+  try {
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:4319/health" -TimeoutSec 2
+    if ($health.ok -ne $true) { return $false }
+    $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:4319/v1/models" -TimeoutSec 2
+    return @($catalog.data | Where-Object { $_.id -eq "auto" }).Count -gt 0
+  } catch {
+    return $false
+  }
+}
+
+function Restart-JevTaskAndWait([int]$TimeoutSeconds = 20) {
+  $taskName = "Jev Codex Router"
+  $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if (-not $task) { return $false }
+
+  try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch {}
+  Start-Sleep -Milliseconds 500
+  try { Start-ScheduledTask -TaskName $taskName -ErrorAction Stop } catch { return $false }
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    Start-Sleep -Milliseconds 500
+    if (Test-JevCatalog) { return $true }
+  } while ((Get-Date) -lt $deadline)
+
+  return $false
+}
+
+function Wait-JevProviderDiscovery([int]$Attempts = 4) {
   for ($i = 0; $i -lt $Attempts; $i++) {
+    if (-not (Test-JevCatalog)) {
+      Write-Host "Jev catalog is not reachable; restarting the Jev Windows task (attempt $($i + 1)/$Attempts)."
+      if (-not (Restart-JevTaskAndWait 20)) {
+        Start-Sleep -Seconds 1
+        continue
+      }
+    }
+
     if (Test-ModelRouter @("codex", "providers", "generic", "test", "jev")) {
       return $true
     }
 
-    # A repeated install can briefly race the previous scheduled-task process.
-    # Make sure the task is running and the local catalog is actually reachable
-    # before asking Codex Router again.
-    try {
-      $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:4319/v1/models" -TimeoutSec 2
-      if (@($catalog.data | Where-Object { $_.id -eq "auto" }).Count -gt 0) {
-        $task = Get-ScheduledTask -TaskName "Jev Codex Router" -ErrorAction SilentlyContinue
-        if ($task -and $task.State -ne "Running") {
-          Start-ScheduledTask -TaskName "Jev Codex Router" -ErrorAction SilentlyContinue
-        }
-      }
-    } catch {}
-
+    # The local endpoint is up but the Router-side fetch lost the race. Keep the
+    # process alive and retry the provider probe; if the endpoint falls over in
+    # between, the next loop actively restarts the task.
     Start-Sleep -Seconds 1
   }
   return $false
+}
+
+function Get-JevServiceFailureSummary {
+  $taskState = "missing"
+  $lastResult = "unknown"
+  try { $taskState = (Get-ScheduledTask -TaskName "Jev Codex Router" -ErrorAction Stop).State } catch {}
+  try { $lastResult = (Get-ScheduledTaskInfo -TaskName "Jev Codex Router" -ErrorAction Stop).LastTaskResult } catch {}
+
+  $errLog = Join-Path $StateDir "jev-router.err.log"
+  $tail = ""
+  if (Test-Path -LiteralPath $errLog -PathType Leaf) {
+    try { $tail = ((Get-Content -LiteralPath $errLog -Tail 12) -join " | ") } catch {}
+  }
+
+  return "task=$taskState LastTaskResult=$lastResult err_tail=$tail"
 }
 
 $RepoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -206,16 +248,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "== 5/10  Provider discovery =="
-if (-not (Wait-JevProviderDiscovery 6)) {
-  $catalogOk = $false
-  try {
-    $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:4319/v1/models" -TimeoutSec 3
-    $catalogOk = @($catalog.data | Where-Object { $_.id -eq "auto" }).Count -gt 0
-  } catch {}
-  if ($catalogOk) {
-    throw "Jev /v1/models is healthy, but Codex Router could not reach the generic provider after retries."
+if (-not (Wait-JevProviderDiscovery 4)) {
+  $summary = Get-JevServiceFailureSummary
+  if (Test-JevCatalog) {
+    throw "Jev /v1/models is healthy, but Codex Router could not reach the generic provider after retries. $summary"
   }
-  throw "Jev provider discovery failed because the local /v1/models endpoint is not staying reachable."
+  throw "Jev provider discovery could not self-heal the local /v1/models endpoint. $summary"
 }
 Write-Host "Jev provider discovery is reachable."
 
