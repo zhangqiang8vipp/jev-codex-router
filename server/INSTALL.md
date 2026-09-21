@@ -103,6 +103,15 @@ Invoke-RestMethod http://127.0.0.1:4319/control/status
 Invoke-RestMethod http://127.0.0.1:4319/control/auto -Method Post -ContentType "application/json" -Body (@{ enabled = $true } | ConvertTo-Json -Compress)
 ```
 
+On a managed install, `control/status` should include
+`"exact_native_route": true`. Jev then sends its concrete native tier back
+through the authenticated caller edge with
+`x-codex-router-exact-route: 1`; the installer applies a guarded one-line
+Codex Router source hook so this exact request skips `native-redirect` without
+hiding that redirect from unrelated concurrent Codex requests. If the hook
+cannot be verified, Jev keeps the older file-suppression path as a compatibility
+fallback rather than risking recursive routing.
+
 ## Key setup
 
 Both platforms default to `~/.hermes/.env`. The secret stays in that file;
@@ -140,13 +149,19 @@ catalog, without printing either credential. During first-time bootstrap,
 ## After a Codex Router update
 
 Provider and model state live outside the router checkout, so updates should not
-touch them. Verify anyway:
+touch them. The scoped native-route hook is source-bound, however: a changed
+`src/router.mjs` invalidates its arm marker immediately and Jev temporarily
+falls back to legacy redirect suppression. Restart the Windows Jev task (its
+launcher reapplies/rearms the guarded hook) or rerun `setup-local.sh` on
+macOS, then verify:
 
 1. `./bin/model-router codex providers generic list` → should show `SHOW jev`.
 2. `cat ~/.codex/codex-router/model-picker.json` → `jev/auto` under `visible`.
 3. `curl -s http://127.0.0.1:4319/health` → `{"ok": true...}`.
-4. `python3 server/jev_server.py --check` → all five checks should be `OK`, including `jev_model`.
-5. If needed: `./bin/model-router codex refresh-catalog` and `./bin/control service restart`, then fully restart Codex.
+4. `Invoke-RestMethod http://127.0.0.1:4319/control/status` on Windows (or
+   `curl -s http://127.0.0.1:4319/control/status`) → `exact_native_route: true`.
+5. `python3 server/jev_server.py --check` → all five checks should be `OK`, including `jev_model`.
+6. If needed: `./bin/model-router codex refresh-catalog` and `./bin/control service restart`, then fully restart Codex.
 
 ## Troubleshooting
 
@@ -221,6 +236,11 @@ assigned invented counterfactual quality.
 
 ## Design notes
 
+- Concrete Jev-selected native tiers re-enter the caller edge as exact-route
+  requests. The scoped hook changes only the native-redirect condition from
+  `requestedModel` to `requestedModel && !exactRouteProbe`; background/native
+  Codex turns that did not come from Jev still see the normal router-wide
+  redirect.
 - The edge emits SSE with no Content-Type; we always re-emit
   `text/event-stream; charset=utf-8` on stream relays.
 - `stream: true` is forced upstream (the edge requires it); non-stream callers
