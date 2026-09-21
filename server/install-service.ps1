@@ -143,7 +143,7 @@ if (-not $resolvedRouter) {
 }
 $RouterDir = $resolvedRouter
 
-$routerStateTemp = "$routerStateFile.tmp-$([Guid]::NewGuid().ToString("N"))"
+$routerStateTemp = "$routerStateFile.tmp-$([Guid]::NewGuid().ToString('N'))"
 try {
   [IO.File]::WriteAllText($routerStateTemp, $RouterDir + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
   Move-Item -LiteralPath $routerStateTemp -Destination $routerStateFile -Force
