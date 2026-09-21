@@ -26,6 +26,71 @@ function Resolve-Python {
   throw "Python 3 was not found. Install Python 3.11+ or the Python launcher."
 }
 
+function Get-JevListenerProcess {
+  $netCmd = Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue
+  if (-not $netCmd) { return $null }
+  try {
+    $connection = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort 4319 -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+    if (-not $connection) { return $null }
+    return Get-CimInstance Win32_Process -Filter "ProcessId = $($connection.OwningProcess)" -ErrorAction SilentlyContinue
+  } catch {
+    return $null
+  }
+}
+
+function Wait-JevPortRelease([int]$TimeoutSeconds = 12) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    $listener = Get-JevListenerProcess
+    if (-not $listener) { return $true }
+
+    $commandLine = [string]$listener.CommandLine
+    if ($commandLine -match '(?i)jev_server\.py' -and
+        ($commandLine -match '(?i)JevCodexRouter' -or
+         $commandLine -like "*$RepoRoot*")) {
+      try {
+        Stop-Process -Id ([int]$listener.ProcessId) -Force -ErrorAction Stop
+      } catch {}
+    }
+
+    Start-Sleep -Milliseconds 300
+  } while ((Get-Date) -lt $deadline)
+
+  return -not [bool](Get-JevListenerProcess)
+}
+
+function Test-JevServiceSurface {
+  try {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    if ($task.State -ne "Running") { return $false }
+
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:4319/health" -TimeoutSec 2
+    if ($health.ok -ne $true -or $health.service -ne "jev-router") { return $false }
+
+    $catalog = Invoke-RestMethod -Uri "http://127.0.0.1:4319/v1/models" -TimeoutSec 2
+    $auto = @($catalog.data | Where-Object { $_.id -eq "auto" } | Select-Object -First 1)
+    return $auto.Count -gt 0
+  } catch {
+    return $false
+  }
+}
+
+function Wait-JevServiceStable([int]$TimeoutSeconds = 30) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $stable = 0
+  do {
+    Start-Sleep -Milliseconds 500
+    if (Test-JevServiceSurface) {
+      $stable += 1
+      if ($stable -ge 3) { return $true }
+    } else {
+      $stable = 0
+    }
+  } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
 if (-not [string]::IsNullOrWhiteSpace($RouterDir)) {
   $RouterDir = [IO.Path]::GetFullPath($RouterDir)
@@ -108,7 +173,15 @@ $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interact
 $existingServiceTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existingServiceTask) {
   try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
-  Start-Sleep -Milliseconds 500
+}
+if (-not (Wait-JevPortRelease 12)) {
+  $listener = Get-JevListenerProcess
+  $detail = if ($listener) {
+    "PID=$($listener.ProcessId) command=$([string]$listener.CommandLine)"
+  } else {
+    "listener details unavailable"
+  }
+  throw "Port 4319 is still occupied after stopping the old Jev task ($detail)."
 }
 
 Register-ScheduledTask -TaskName $TaskName -Action $serviceAction -Trigger @($logon, $heartbeat) -Settings $settings -Principal $principal -Force | Out-Null
@@ -129,20 +202,27 @@ Register-ScheduledTask -TaskName $EvalTaskName -Action $evalAction -Trigger $eva
 
 Start-ScheduledTask -TaskName $TaskName
 
-$healthy = $false
-for ($i = 0; $i -lt 20; $i++) {
-  Start-Sleep -Milliseconds 750
-  try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:4319/health" -TimeoutSec 2
-    if ($health.ok -eq $true) {
-      $healthy = $true
-      break
-    }
-  } catch {
-  }
+$healthy = Wait-JevServiceStable 30
+if (-not $healthy) {
+  # One explicit restart covers a task that lost the first launch during the
+  # service handoff. Do not loop forever; the scheduled task already has its
+  # own minute-level restart policy.
+  try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
+  [void](Wait-JevPortRelease 8)
+  try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop } catch {}
+  $healthy = Wait-JevServiceStable 20
 }
 if (-not $healthy) {
-  throw "Jev service did not become healthy. Inspect $StateDir\jev-router.err.log"
+  $taskState = "missing"
+  $lastResult = "unknown"
+  try { $taskState = (Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop).State } catch {}
+  try { $lastResult = (Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop).LastTaskResult } catch {}
+  $tail = ""
+  $errLog = Join-Path $StateDir "jev-router.err.log"
+  if (Test-Path -LiteralPath $errLog -PathType Leaf) {
+    try { $tail = ((Get-Content -LiteralPath $errLog -Tail 12) -join " | ") } catch {}
+  }
+  throw "Jev service did not stay healthy with /v1/models available (task=$taskState LastTaskResult=$lastResult). $tail"
 }
 
 $python = Resolve-Python
