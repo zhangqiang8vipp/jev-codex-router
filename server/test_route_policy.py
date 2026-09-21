@@ -7,6 +7,11 @@ from routing_policy import ROUTE_PAIRS, decision_from_answers
 
 
 class JointPolicy(unittest.TestCase):
+    def test_four_models_times_five_efforts_make_twenty_routes(self):
+        self.assertEqual(set(jev.TIERS), {jev.LUNA, jev.TERRA, jev.SOL, jev.ASTRA})
+        self.assertEqual(set(jev.EFFORTS), {"low", "medium", "high", "xhigh", "max"})
+        self.assertEqual(len(ROUTE_PAIRS), 20)
+
     def test_every_valid_pair_survives_confidence_and_step_metadata(self):
         for model, effort in ROUTE_PAIRS.values():
             for confidence in (None, 0.0, 0.2, 0.5, 1.0):
