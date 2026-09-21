@@ -159,6 +159,15 @@ if ($LASTEXITCODE -ne 0) {
   throw "Auto toggle installation failed."
 }
 
+try {
+  $autoStatus = Invoke-RestMethod -Uri "http://127.0.0.1:4319/control/status" -TimeoutSec 4
+  if ($autoStatus.available -ne $true) {
+    throw "Jev server cannot reach Codex Router control.mjs. Check CODEX_ROUTER_DIR."
+  }
+} catch {
+  throw "Auto control readiness failed: $($_.Exception.Message)"
+}
+
 Write-Host "== 9/10  Full readiness =="
 $env:JEV_ENV_FILE = $JevEnvFile
 $env:CODEX_ROUTER_STATE_DIR = $StateDir
