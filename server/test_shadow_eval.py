@@ -68,12 +68,18 @@ class EventShape(unittest.TestCase):
             total_ms=1200,
             jev_ms=100,
             step_type="user_turn",
+            route_source="jev",
+            route_reason="new_user_turn",
+            jev_cache="miss",
         )
         self.assertTrue(event["route_changed"])
         self.assertEqual(event["jev_route"]["effort"], "high")
         self.assertEqual(event["smart_route"]["effort"], "medium")
         self.assertEqual(event["attempt_count"], 1)
         self.assertEqual(event["retry_count"], 0)
+        self.assertEqual(event["route_source"], "jev")
+        self.assertEqual(event["route_reason"], "new_user_turn")
+        self.assertEqual(event["jev_cache"], "miss")
         self.assertTrue(event["success"])
 
     def test_feedback_carries_no_prompt_data(self):
