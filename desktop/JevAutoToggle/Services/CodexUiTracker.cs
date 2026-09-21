@@ -52,7 +52,7 @@ internal sealed class CodexUiTracker
 
                     var controls = window.FindAll(
                         TreeScope.Descendants,
-                        new OrCondition(
+                        new System.Windows.Automation.OrCondition(
                             new PropertyCondition(
                                 AutomationElement.ControlTypeProperty,
                                 ControlType.Button),
