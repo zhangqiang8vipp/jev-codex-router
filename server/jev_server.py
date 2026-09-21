@@ -73,7 +73,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
-                            TIERS, decision_from_answers, route)
+                            TERRA, TIERS, decision_from_answers, route)
+from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
+                           enrich_jev_state, extract_cwd, next_failure_streak,
+                           session_key)
 
 HOME = os.path.expanduser("~")
 STATE = os.path.join(HOME, ".codex", "codex-router")
@@ -86,6 +89,9 @@ DEBUG_PATH = os.path.join(STATE, "jev-router.debug")
 # removed from replayed history, including legacy trailing signatures.
 SIGNATURE_PATH = os.path.join(STATE, "jev-router.signature")
 LOG_PATH = os.path.join(STATE, "jev-router-live.jsonl")
+SESSION_PATH = os.path.join(STATE, "jev-router-sessions.json")
+SESSION_STORE = SessionStore(SESSION_PATH)
+REPO_PROFILER = RepoProfiler()
 
 LISTEN = ("127.0.0.1", 4319)
 ROUTER = ("127.0.0.1", 4202)
@@ -579,7 +585,7 @@ ROUTE_GLYPHS = {
     "gpt-5.6-luna": ("luna", "⚡"),      # cheap tier, adaptive thinking
     "gpt-5.6-sol": ("sol", "🧠"),        # reasoning workhorse
     "gpt-6-astra": ("astra", "🚀"),      # frontier
-    "gpt-5.6-terra": ("terra", "🌍"),
+    TERRA: ("terra", "🌍"),
 }
 TANDEM_GLYPHS = {
     "deepseek-v4.1-flash": ("deepseek", "🐳"),  # Go standard (native dry)
@@ -1101,12 +1107,18 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         task, prev_assistant, signals = extract(payload)
         step = classify(payload)
+        cwd = extract_cwd(payload)
+        thread_key = session_key(payload, cwd)
+        session = SESSION_STORE.get(thread_key)
+        failure_streak = next_failure_streak(session, step)
+        repo = REPO_PROFILER.snapshot(cwd)
         stream_requested = payload.get("stream") is True
 
         tier = depth = conf = None
         jev_ms = None
         decision = None
         jev_usage = None
+        smart_gate = None
         if os.path.exists(OFF_PATH):
             model, effort, speed, gate = ASTRA, None, "default", "off"
         else:
@@ -1114,6 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
             if key and (task or step.get("digest") or signals.get("has_image")):
                 jt0 = time.time()
                 state = jev_state(task, prev_assistant, signals, step)
+                state = enrich_jev_state(state, task, session, repo, failure_streak)
                 try:
                     result = call_jev_routed(key, state)
                     decision = decision_from_answers(result.get("answers"))
@@ -1126,11 +1139,23 @@ class Handler(BaseHTTPRequestHandler):
                     tier, depth, conf = (decision["model"], decision["effort"],
                                          decision["confidence"])
                     model, effort, speed, gate = route(tier, depth)
+                    model, effort, smart_gate = apply_guardrails(
+                        model, effort, task, step, session, failure_streak)
+                    if smart_gate != "apply":
+                        gate = f"{gate}+{smart_gate}"
                 except Exception as exc:
                     model, effort, speed, gate = ASTRA, "medium", "default", f"jev_error:{type(exc).__name__}"
                 jev_ms = int((time.time() - jt0) * 1000)
             else:
                 model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
+
+        # Remember only bounded routing state. Operational fail-open paths do
+        # not overwrite the last healthy semantic route.
+        if thread_key:
+            remembered = {"failure_streak": failure_streak}
+            if decision is not None and model in TIERS:
+                remembered.update(last_model=model, last_effort=effort)
+            SESSION_STORE.put(thread_key, **remembered)
 
         would = None
         if os.path.exists(SHADOW_PATH):
@@ -1250,6 +1275,10 @@ class Handler(BaseHTTPRequestHandler):
             "step": step["step_type"],
             "errored": step["errored"],
             "digest_len": len(step["digest"]),
+            "smart_gate": smart_gate,
+            "failure_streak": failure_streak,
+            "session": thread_key[:10] if thread_key else None,
+            "repo": repo.as_signal() if repo.available else None,
             "stripped": stripped,
             "would": would,
             "task": task[:110],
