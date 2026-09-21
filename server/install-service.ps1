@@ -92,12 +92,6 @@ function Wait-JevServiceStable([int]$TimeoutSeconds = 30) {
 }
 
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
-if (-not [string]::IsNullOrWhiteSpace($RouterDir)) {
-  $RouterDir = [IO.Path]::GetFullPath($RouterDir)
-  if (-not (Test-Path -LiteralPath (Join-Path $RouterDir "src\control.mjs") -PathType Leaf)) {
-    throw "Codex Router control.mjs not found under: $RouterDir"
-  }
-}
 $runService = Join-Path $RepoRoot "server\run-service.ps1"
 $runReport = Join-Path $RepoRoot "server\run-shadow-report.ps1"
 $server = Join-Path $RepoRoot "server\jev_server.py"
@@ -116,6 +110,48 @@ if ([string]::IsNullOrWhiteSpace($StateDir)) {
 }
 $StateDir = [IO.Path]::GetFullPath($StateDir)
 [void][IO.Directory]::CreateDirectory($StateDir)
+
+$routerCandidates = @()
+if (-not [string]::IsNullOrWhiteSpace($RouterDir)) { $routerCandidates += $RouterDir }
+if (-not [string]::IsNullOrWhiteSpace($env:CODEX_ROUTER_DIR)) { $routerCandidates += $env:CODEX_ROUTER_DIR }
+$routerStateFile = Join-Path $StateDir "jev-router-dir.txt"
+if (Test-Path -LiteralPath $routerStateFile -PathType Leaf) {
+  try {
+    $savedRouter = (Get-Content -LiteralPath $routerStateFile -Raw -ErrorAction Stop).Trim()
+    if ($savedRouter) { $routerCandidates += $savedRouter }
+  } catch {}
+}
+if ($env:LOCALAPPDATA) { $routerCandidates += (Join-Path $env:LOCALAPPDATA "codex-router") }
+$routerCandidates += @(
+  (Join-Path $HOME "Documents\GitHub\codex-router"),
+  (Join-Path $HOME "GitHub\codex-router"),
+  (Join-Path $HOME "source\repos\codex-router"),
+  (Join-Path $HOME "codex-router")
+)
+
+$resolvedRouter = $null
+foreach ($candidate in $routerCandidates | Select-Object -Unique) {
+  if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+  try { $root = [IO.Path]::GetFullPath($candidate.Trim()) } catch { continue }
+  if (Test-Path -LiteralPath (Join-Path $root "src\control.mjs") -PathType Leaf) {
+    $resolvedRouter = $root
+    break
+  }
+}
+if (-not $resolvedRouter) {
+  throw "Codex Router control.mjs could not be resolved. Pass -RouterDir C:\path\to\codex-router."
+}
+$RouterDir = $resolvedRouter
+
+$routerStateTemp = "$routerStateFile.tmp-$([Guid]::NewGuid().ToString('N'))"
+try {
+  [IO.File]::WriteAllText($routerStateTemp, $RouterDir + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $routerStateTemp -Destination $routerStateFile -Force
+} finally {
+  if (Test-Path -LiteralPath $routerStateTemp) {
+    Remove-Item -LiteralPath $routerStateTemp -Force -ErrorAction SilentlyContinue
+  }
+}
 
 if ([string]::IsNullOrWhiteSpace($JevEnvFile)) {
   $JevEnvFile = if ($env:JEV_ENV_FILE) {
