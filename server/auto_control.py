@@ -2,8 +2,9 @@
 
 This module never edits Codex UI/config directly.  Auto ON asks the installed
 Codex Router to redirect every native GPT request that reaches it to jev/auto;
-Auto OFF clears that redirect so the user's native Codex model/effort selection
-takes effect again.
+Auto OFF restores the native redirect that existed before Auto was enabled.
+On a normal installation with no prior redirect, the user's native Codex
+model/effort selection takes effect again.
 
 The state file is owned by Codex Router.  We read it for cheap status polling
 and invoke Codex Router's own control command for mutations so its validation
