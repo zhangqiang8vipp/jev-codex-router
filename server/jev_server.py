@@ -1894,6 +1894,12 @@ class Handler(BaseHTTPRequestHandler):
                         data = json.dumps(assembled).encode("utf-8")
                         out_ctype = "application/json"
                 quota_error = terminal_quota_error(status, resp.headers, data)
+                if quota_error is not None:
+                    # Account/workspace exhaustion is terminal but not evidence
+                    # that this physical tier is unhealthy. Streaming callers
+                    # get the native-looking response.failed envelope below;
+                    # non-stream callers keep the upstream HTTP error verbatim.
+                    quota_hit = True
                 if quota_error is not None and stream_requested:
                     # Terminal ChatGPT subscription/quota exhaustion: return a
                     # 200 SSE response.failed so Codex shows the native
