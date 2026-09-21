@@ -1,6 +1,6 @@
 # Jev Codex Router
 
-[![ci](https://github.com/0xNatoshi/jev-codex-router/actions/workflows/ci.yml/badge.svg)](https://github.com/0xNatoshi/jev-codex-router/actions/workflows/ci.yml)
+[![ci](https://github.com/zhangqiang8vipp/jev-codex-router/actions/workflows/ci.yml/badge.svg)](https://github.com/zhangqiang8vipp/jev-codex-router/actions/workflows/ci.yml)
 
 **Per-turn model routing for Codex, driven by [Jev](https://docs.typesafe.ai) (TypeSafe System One).**
 
@@ -16,6 +16,9 @@ Installing with an AI agent? Hand it [AGENTS.md](AGENTS.md).
 This is not a fork of any router: it plugs into an existing local
 **Codex Router** installation through its official extension points
 (a *generic provider* + a *curated model*), so router updates never overwrite it.
+
+**Fork it. Change the policy. Keep your own tandem.** MIT. No permission needed.
+See [Fork and customize](#fork-and-customize--允许自己改) below.
 
 ## How it works
 
@@ -39,7 +42,7 @@ Codex ──▶ Codex Router (:4202)
 - **Fail-open** — any Jev error keeps the turn alive (safe fallback route).
 - **Kill switch** — a sentinel file routes without Jev, instantly.
 - **Codex-dry tandem** — when native (ChatGPT) usage is exhausted (sentinel
-  file, or an observed 429 / usage-limit response), the triptych is replaced:
+  file, or an observed 429 / usage-limit response), the four-tier native set is replaced:
   GLM (`opencode-go/glm-5.3-flash`) for frontier-tier steps, deepseek
   (`opencode-go/deepseek-v4.1-flash`) for everything else. The failed call is
   retried on the tandem, at the thinking depth Jev decided, mapped onto the Go
@@ -90,7 +93,7 @@ These are recovery/continuity floors, not keyword-based task classification.
 
 ### Codex-dry tandem — only while native usage is exhausted
 
-The triptych is the policy **unless** the ChatGPT usage window is exhausted
+The four-tier native set is the policy **unless** the ChatGPT usage window is exhausted
 (manual sentinel file, or an automatic flip on a 429 / usage-limit response,
 which also retries the failed call on the tandem). While dry:
 
@@ -100,7 +103,7 @@ which also retries the failed call on the tandem). While dry:
 | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` | `opencode-go/deepseek-v4.1-flash` |
 
 An automatic flip lasts until the instant the edge announced for the window
-reset, so the first call after the quota returns is served by the triptych
+reset, so the first call after the quota returns is served by the native four-tier set
 again; when a refusal announces no instant it falls back to a 30-minute
 re-probe, and a week is the ceiling on anything a refusal claims. It is cleared
 by the first successful native call, and the manual sentinel file is never
@@ -109,7 +112,7 @@ auto-cleared.
 Two details keep the substitute transparent. The decided depth travels with the
 call, mapped onto the Go ladder — `low` stays `low`, `medium` and `high` become
 `high`, `xhigh` or above become `max` — because those models declare three rungs
-where the triptych exposes five, and the API forwarder clamps the value once more
+where the native models expose five, and the API forwarder clamps the value once more
 onto the route's own ladder. And a tandem call that comes back retryable
 (429/5xx) is tried once on the sibling model: opencode Go meters the two Go
 models against separate allowances and reports a spent one the same way it
@@ -191,19 +194,25 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 Prerequisites: macOS, a Codex desktop install wired to a **Codex Router**
 (checkout with `bin/codex-router`), Python 3.11+, and a TypeSafe API key (Jev).
 
-**1. Give the server your TypeSafe key** — either
-`export TYPESAFE_API_KEY=...` in the service environment, or:
+**1. Give the server your TypeSafe key.** For persistent macOS use, store it in
+an owner-readable file (launchd does not inherit your interactive shell):
 
 ```bash
-echo 'TYPESAFE_API_KEY=your-key' >> ~/.hermes/.env   # default env file
-# (override the path with JEV_ENV_FILE=/path/to/env)
+mkdir -p ~/.hermes
+printf '%s\n' 'TYPESAFE_API_KEY=your-key' > ~/.hermes/.env
+chmod 600 ~/.hermes/.env
+# optional: JEV_ENV_FILE=/path/to/env bash server/install-service.sh
 ```
+
+A foreground run may also use `TYPESAFE_API_KEY` from the process environment.
 
 **2. Start the server** (foreground test):
 
 ```bash
 python3 server/jev_server.py
 curl -s http://127.0.0.1:4319/health
+# in another terminal, after Codex Router is running:
+python3 server/jev_server.py --check
 ```
 
 **3. Register with the Codex Router:**
@@ -287,7 +296,7 @@ stops answering.
 | Shadow mode (decide + log, serve astra) | `touch ~/.codex/codex-router/jev-router.shadow` |
 | Debug capture (shapes + raw streams) | `touch ~/.codex/codex-router/jev-router.debug` |
 | Kill switch (no Jev → frontier) | `touch ~/.codex/codex-router/jev-router.off` (delete the file to re-enable) |
-| Force the Codex-dry tandem | `touch ~/.codex/codex-router/jev-router.codex-dry` (delete the file to return to luna/sol/astra) |
+| Force the Codex-dry tandem | `touch ~/.codex/codex-router/jev-router.codex-dry` (delete the file to return to luna/terra/sol/astra) |
 | Inspect the dry auto state | `cat ~/.codex/codex-router/jev-router.codex-dry.json` (reason + expiry; auto-cleared by the next successful native call) |
 | Hide the model | `./bin/control picker set jev/auto hide` |
 | Disable the provider | `./bin/codex-router providers generic disable jev` |
@@ -325,6 +334,25 @@ curl -s http://127.0.0.1:4319/health
 
 Early, but running in production on the author's setup. The joint routing policy needs outcome calibration on real usage; the local
 decision and attempt logs provide observations, not quality labels.
+
+## Fork and customize / 允许自己改
+
+This tree is MIT. Fork it, strip it, or replace the policy. You do not need to
+ask. Keep the original copyright notice in copies of the Software.
+
+Suggested local edit points:
+
+| Want | File |
+|---|---|
+| Change model + effort choices | `server/routing_policy.py` |
+| Change session/repo guardrails | `server/smart_context.py` |
+| Bump the logged policy id | `POLICY_VERSION` in `server/routing_policy.py` |
+| Swap Codex-dry substitutes | tandem tables in `server/jev_server.py` |
+| Recalibrate after changes | `python3 server/report_routing.py --days 7` |
+
+Do not reuse a replay cache built under another `POLICY_VERSION`.
+
+Upstream origin: [0xNatoshi/jev-codex-router](https://github.com/0xNatoshi/jev-codex-router).
 
 ## License
 
