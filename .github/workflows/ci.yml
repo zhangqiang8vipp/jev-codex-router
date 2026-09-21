@@ -39,6 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $files = @(
+            "install.ps1",
             "setup-local.ps1",
             "server/install-service.ps1",
             "server/install-toggle.ps1",
