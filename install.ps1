@@ -146,10 +146,10 @@ function Get-AppendedUtf8Text([string]$Path, [int64]$Offset) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
   try {
     $bytes = [IO.File]::ReadAllBytes($Path)
-    if ($Offset -lt 0 -or $Offset -ge $bytes.LongLength) {
-      if ($Offset -ge $bytes.LongLength) { return "" }
+    if ($Offset -lt 0 -or $Offset -gt $bytes.LongLength) {
       $Offset = 0
     }
+    if ($Offset -eq $bytes.LongLength) { return "" }
     $count = [int]($bytes.LongLength - $Offset)
     return [Text.Encoding]::UTF8.GetString($bytes, [int]$Offset, $count)
   } catch {
