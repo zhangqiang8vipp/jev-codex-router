@@ -99,12 +99,42 @@ function Get-CodexRouterLogPath {
   return Join-Path $HOME ".codex\codex-router\router.log"
 }
 
+function Get-OpenSslRepairMarkerPath {
+  return Join-Path $HOME ".codex\codex-router\jev-openssl-repair-v2.json"
+}
+
+function Get-OpenSslRepairCheckpoint {
+  $marker = Get-OpenSslRepairMarkerPath
+  if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return [int64]0 }
+  try {
+    $parsed = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+    $value = [int64]$parsed.log_length
+    if ($value -lt 0) { return [int64]0 }
+    return $value
+  } catch {
+    return [int64]0
+  }
+}
+
+function Record-OpenSslRepairCheckpoint {
+  $log = Get-CodexRouterLogPath
+  $marker = Get-OpenSslRepairMarkerPath
+  $parent = Split-Path -Parent $marker
+  [void][IO.Directory]::CreateDirectory($parent)
+  $payload = @{
+    version = 2
+    log_length = (Get-FileLength $log)
+    at = [DateTimeOffset]::Now.ToString("O")
+  } | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($marker, $payload + "`r`n", [Text.UTF8Encoding]::new($false))
+}
+
 function Test-HistoricalOpenSslCrash {
   $log = Get-CodexRouterLogPath
-  return (
-    (Test-Path -LiteralPath $log -PathType Leaf) -and
-    (Select-String -LiteralPath $log -Pattern "no OPENSSL_Applink" -Quiet)
-  )
+  if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { return $false }
+  $checkpoint = Get-OpenSslRepairCheckpoint
+  $text = Get-AppendedUtf8Text $log $checkpoint
+  return $text -match "no OPENSSL_Applink"
 }
 
 function Get-FileLength([string]$Path) {
@@ -192,19 +222,19 @@ function Prepare-And-VerifyCodexRouterPython([string]$Directory, [bool]$ForceRep
     throw "Codex Router Python verification script is missing: $verify"
   }
 
-  $requirementsJson = & node.exe -e "import('./src/install-plan.mjs').then(m=>process.stdout.write(JSON.stringify(m.PYTHON_REQUIREMENTS)))" 2>$null
-  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($requirementsJson)) {
-    throw "Could not read Codex Router's pinned Python requirements."
-  }
-  $requirements = @($requirementsJson | ConvertFrom-Json)
-  $verifyArgs = @($verify, "--venv", $venv, "--proxy-timeout", "90")
-  foreach ($requirement in $requirements) {
-    $verifyArgs += @("--requirement", [string]$requirement)
-  }
-
   Write-Step "Smoke-testing LiteLLM before registering the Windows task"
   Push-Location $Directory
   try {
+    $requirementsJson = & node.exe -e "import('./src/install-plan.mjs').then(m=>process.stdout.write(JSON.stringify(m.PYTHON_REQUIREMENTS)))" 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($requirementsJson)) {
+      throw "Could not read Codex Router's pinned Python requirements."
+    }
+    $requirements = @($requirementsJson | ConvertFrom-Json)
+    $verifyArgs = @($verify, "--venv", $venv, "--proxy-timeout", "90")
+    foreach ($requirement in $requirements) {
+      $verifyArgs += @("--requirement", [string]$requirement)
+    }
+
     & $venvPython @verifyArgs
     if ($LASTEXITCODE -ne 0) {
       throw "LiteLLM smoke test failed before service installation."
@@ -303,7 +333,14 @@ function Ensure-CodexRouterBaseInstalled([string]$Directory) {
     if ($newLog -match "no OPENSSL_Applink") {
       throw "This install attempt still hit OPENSSL_Applink after rebuilding and smoke-testing the system-Python venv."
     }
+    if ($forceOpenSslRepair) {
+      Record-OpenSslRepairCheckpoint
+    }
     throw "Codex Router installer exited with status $LASTEXITCODE. The failure was not a new OPENSSL_Applink crash."
+  }
+
+  if ($forceOpenSslRepair) {
+    Record-OpenSslRepairCheckpoint
   }
 }
 
