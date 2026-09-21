@@ -99,6 +99,7 @@ if (Test-Path -LiteralPath $patcher -PathType Leaf) {
   $patchArgs = @($python.Prefix) + @(
     $patcher,
     "--router-dir", $RouterDir,
+    "--state-dir", $StateDir,
     "--restart"
   )
   & $python.Path @patchArgs 1>> $outLog 2>> $errLog
