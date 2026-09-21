@@ -20,6 +20,7 @@ from typing import Optional
 
 AUTO_ROUTE = "jev/auto"
 CONTROL_TIMEOUT_S = 30.0
+ROUTER_DIR_STATE_NAME = "jev-router-dir.txt"
 
 
 @dataclass(frozen=True)
@@ -100,17 +101,50 @@ def read_redirect_model(state_dir: str) -> Optional[str]:
     return model.strip() if isinstance(model, str) and model.strip() else None
 
 
-def resolve_control_script(router_dir: Optional[str]) -> Optional[str]:
-    if not router_dir:
-        return None
-    root = os.path.realpath(os.path.expanduser(router_dir))
-    script = os.path.join(root, "src", "control.mjs")
-    return script if os.path.isfile(script) else None
+def resolve_control_script(router_dir: Optional[str], state_dir: Optional[str] = None) -> Optional[str]:
+    """Resolve control.mjs without depending on one volatile process environment."""
+    candidates = []
+    if router_dir:
+        candidates.append(router_dir)
+    env_router = os.environ.get("CODEX_ROUTER_DIR", "").strip()
+    if env_router:
+        candidates.append(env_router)
+    if state_dir:
+        try:
+            with open(os.path.join(state_dir, ROUTER_DIR_STATE_NAME), encoding="utf-8-sig") as fh:
+                saved = fh.read().strip()
+            if saved:
+                candidates.append(saved)
+        except OSError:
+            pass
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        candidates.append(os.path.join(local_app_data, "codex-router"))
+    candidates.extend((
+        os.path.join(os.path.expanduser("~"), "Documents", "GitHub", "codex-router"),
+        os.path.join(os.path.expanduser("~"), "GitHub", "codex-router"),
+        os.path.join(os.path.expanduser("~"), "source", "repos", "codex-router"),
+        os.path.join(os.path.expanduser("~"), "codex-router"),
+    ))
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = os.path.realpath(os.path.expanduser(candidate))
+        if root in seen:
+            continue
+        seen.add(root)
+        script = os.path.join(root, "src", "control.mjs")
+        if os.path.isfile(script):
+            return script
+    return None
 
 
 def status(state_dir: str, router_dir: Optional[str]) -> AutoStatus:
     model = read_redirect_model(state_dir)
-    available = resolve_control_script(router_dir) is not None
+    available = resolve_control_script(router_dir, state_dir) is not None
     return AutoStatus(
         enabled=model == AUTO_ROUTE,
         redirect_model=model,
@@ -136,7 +170,7 @@ def _run_control(script: str, action: str, model: Optional[str] = None):
 
 
 def set_enabled(state_dir: str, router_dir: Optional[str], enabled: bool) -> AutoStatus:
-    script = resolve_control_script(router_dir)
+    script = resolve_control_script(router_dir, state_dir)
     if not script:
         return AutoStatus(
             enabled=False,
