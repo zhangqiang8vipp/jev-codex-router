@@ -412,6 +412,25 @@ def _native_redirect_paths():
     )
 
 
+def native_redirect_suppression_active():
+    with _NATIVE_REDIRECT_LOCK:
+        return _NATIVE_REDIRECT_DEPTH > 0
+
+
+def held_redirect_model():
+    """Return the temporarily-held redirect while a concrete forward is active."""
+    _path, held = _native_redirect_paths()
+    try:
+        with open(held, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    model = value.get("model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
 def recover_native_redirect():
     """Recover a redirect left aside by an interrupted previous process.
 
@@ -1279,6 +1298,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auto_status(self):
         snapshot = auto_status(STATE, CODEX_ROUTER_DIR).as_dict()
+        # Suppression temporarily moves the redirect file out of the normal
+        # status path. Report the held state so the desktop badge does not
+        # flicker OFF during every routed request.
+        if native_redirect_suppression_active():
+            held_model = held_redirect_model()
+            if held_model:
+                snapshot["redirect_model"] = held_model
+                snapshot["auto"] = held_model == "jev/auto"
         snapshot["route"] = last_route_status() or None
         snapshot["policy_version"] = POLICY_VERSION
         return snapshot
@@ -1295,6 +1322,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": "invalid json"}})
         if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
             return self._json(400, {"error": {"message": "enabled must be boolean"}})
+        # Mutating native redirect while it is temporarily held would make an
+        # OFF click look successful and then be undone when the forward exits.
+        # Fail explicitly; the UI can retry after the in-flight turn completes.
+        if native_redirect_suppression_active():
+            payload = self._auto_status()
+            payload["error"] = "routing request in flight; retry Auto toggle shortly"
+            return self._json(503, payload)
         result = set_auto_enabled(STATE, CODEX_ROUTER_DIR, body["enabled"])
         payload = result.as_dict()
         payload["route"] = last_route_status() or None
