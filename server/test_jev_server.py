@@ -479,5 +479,34 @@ class RuntimeSafety(unittest.TestCase):
                 jev._bounded_timeout(9.0, 30.0)
 
 
+    def test_request_specific_4xx_releases_half_open_probe_without_reopening(self):
+        with mock.patch.object(jev.time, "time", return_value=100.0):
+            jev.breaker_record(jev.LUNA, False)
+            jev.breaker_record(jev.LUNA, False)
+        with mock.patch.object(jev.time, "time", return_value=161.0):
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+            jev.breaker_finish(jev.LUNA, 400)
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+
+    def test_retryable_429_reopens_half_open_probe(self):
+        with mock.patch.object(jev.time, "time", return_value=100.0):
+            jev.breaker_record(jev.LUNA, False)
+            jev.breaker_record(jev.LUNA, False)
+        with mock.patch.object(jev.time, "time", return_value=161.0):
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+            jev.breaker_finish(jev.LUNA, 429)
+        with mock.patch.object(jev.time, "time", return_value=200.0):
+            self.assertFalse(jev.breaker_available(jev.LUNA))
+
+    def test_terminal_quota_releases_probe_without_marking_model_healthy(self):
+        with mock.patch.object(jev.time, "time", return_value=100.0):
+            jev.breaker_record(jev.LUNA, False)
+            jev.breaker_record(jev.LUNA, False)
+        with mock.patch.object(jev.time, "time", return_value=161.0):
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+            jev.breaker_finish(jev.LUNA, 200, quota_hit=True)
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+
+
 if __name__ == "__main__":
     unittest.main()
