@@ -33,6 +33,10 @@ next-turn tool success/error. It never replays a second model route.
    side effects. Counterfactual quality is unknown.
 6. TypeSafe probabilities/confidence are diagnostic evidence, not proof of
    correctness. Keep deterministic policy and exact calculations in code.
+7. **Do not simulate picker clicks for Auto.** Codex owns its model/reasoning UI.
+   Auto is implemented only through Codex Router `native-redirect=jev/auto`.
+8. Auto OFF must restore the redirect that existed immediately before Auto was
+   enabled. Never clear or overwrite a newer operator redirect.
 
 ## Prerequisites
 
@@ -44,6 +48,7 @@ Common:
 - Node.js required by Codex Router.
 - TypeSafe key stored in `~/.hermes/.env` or a file named by
   `JEV_ENV_FILE`. Ask for the file path if missing, never the value.
+- .NET 8 SDK on Windows to publish the self-contained WPF Auto overlay.
 
 Windows is first-class. Codex Router's current Windows entrypoint is
 `model-router.ps1`; do not substitute old `bin/codex-router` commands.
@@ -67,10 +72,13 @@ The script must complete all of these stages:
    `openai-responses`, private-loopback explicitly allowed.
 4. `Jev Codex Router` hidden Scheduled Task plus one-minute heartbeat.
 5. `Jev Codex Router Shadow Eval` daily Scheduled Task.
-6. Generic provider live test.
-7. Curation of `jev/auto` with
-   `low,medium,high,xhigh,max` and apply/restart.
-8. `py -3 server\jev_server.py --check` with all checks OK.
+6. Generic provider live test and curation of `jev/auto` with
+   `low,medium,high,xhigh,max`.
+7. Codex Router signed routing enabled so native GPT requests reach the local
+   router while ChatGPT authentication stays active.
+8. `Jev Codex Auto Toggle` WPF Scheduled Task installed. It is anchored beside
+   Codex's own reasoning control and exposes one Auto button only.
+9. `py -3 server\jev_server.py --check` with all checks OK.
 
 Windows background tasks are installed by
 `server/install-service.ps1` and removed by
@@ -135,6 +143,17 @@ The full readiness check verifies:
 
 The health-only endpoint is not enough to claim end-to-end readiness.
 
+Auto control readiness additionally requires `CODEX_ROUTER_DIR` to point to the
+current Codex Router checkout. Verify:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:4319/control/status
+Get-ScheduledTask -TaskName "Jev Codex Auto Toggle"
+```
+
+Do not instruct the user to select `jev/auto` manually after Windows setup.
+They should keep using Codex's native model/reasoning UI and toggle Auto.
+
 ## Shadow Eval
 
 Raw eval events:
@@ -193,6 +212,17 @@ Get-Content "$HOME\.codex\codex-router\jev-shadow-eval.jsonl" -Wait
 Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"
 ```
 
+### Auto routing control
+
+Auto ON invokes Codex Router's validated control surface to set
+`native-redirect=jev/auto`. Auto OFF restores the immediately preceding
+redirect. Native redirect is all-or-nothing for native GPT traffic reaching the
+router, so background native turns are included while Auto is on.
+
+The overlay must not read or write prompt text and must not read credentials.
+Its only service calls are loopback `GET /control/status` and
+`POST /control/auto` with a boolean.
+
 Sentinel files are platform-independent in the router state directory:
 
 - `jev-router.off`: skip Jev and use frontier fail-open.
@@ -231,8 +261,9 @@ python -m compileall -q server poc
 python -m unittest discover -s server -p "test_*.py" -v
 ```
 
-On Windows also parse every `.ps1` file with PowerShell's language parser.
-CI contains a `windows-syntax` job for this.
+On Windows also parse every `.ps1` file with PowerShell's language parser and
+build `desktop/JevAutoToggle/JevAutoToggle.csproj` with .NET 8. CI contains a
+`windows-syntax` job for both checks.
 
 ## Current known limitations
 
