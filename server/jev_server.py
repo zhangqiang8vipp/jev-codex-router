@@ -560,6 +560,7 @@ _BREAKER = {}            # model -> (fail_count, first_fail_ts, open_until, prob
 _BREAKER_LOCK = threading.Lock()
 _BREAKER_THRESHOLD = 2   # consecutive failures before opening
 _BREAKER_OPEN_S = 60.0   # how long a model is skipped
+RETRYABLE_UPSTREAM = frozenset({429, 500, 502, 503, 504})
 
 
 def _breaker_unpack(entry):
@@ -635,6 +636,20 @@ def breaker_pick(preferred_model):
         if breaker_available(candidate):
             return candidate, candidate != preferred_model
     return None, True
+
+
+def breaker_finish(model, status, quota_hit=False):
+    """Finish a claimed circuit slot based only on model-health evidence."""
+    if quota_hit:
+        breaker_release(model)
+    elif status == 200:
+        breaker_record(model, True)
+    elif status in RETRYABLE_UPSTREAM:
+        breaker_record(model, False)
+    else:
+        # Request-specific 4xx/protocol rejections do not prove the physical
+        # model is unhealthy, and must not strand a half-open probe.
+        breaker_release(model)
 
 
 def validate_ask(body):
@@ -1573,7 +1588,6 @@ class Handler(BaseHTTPRequestHandler):
 
         out_path = path if path.startswith("/v1") else "/v1" + path
         self._attempts = []
-        RETRYABLE_UPSTREAM = {429, 500, 502, 503, 504}
         # Hard wall-clock budget for the whole tier-escalation sequence.
         ESCALATION_DEADLINE = 75.0
         escalation_deadline = time.monotonic() + ESCALATION_DEADLINE
@@ -1628,16 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Terminal subscription exhaustion is carried to Codex as a
                 # response.failed SSE. It is handled, not a healthy upstream
                 # success and not a reason to probe another tier.
-                if quota_hit:
-                    breaker_release(attempt_model)
-                elif status == 200:
-                    breaker_record(attempt_model, True)
-                elif status in RETRYABLE_UPSTREAM:
-                    breaker_record(attempt_model, False)
-                else:
-                    # 4xx/protocol rejections are request-specific, not proof
-                    # that the physical model is unhealthy.
-                    breaker_release(attempt_model)
+                breaker_finish(attempt_model, status, quota_hit)
                 if status == 200:
                     break
 
@@ -1684,14 +1689,7 @@ class Handler(BaseHTTPRequestHandler):
                     except (http.client.HTTPException, ConnectionError, OSError):
                         breaker_record(model, False)
                         raise
-                if quota_hit:
-                    breaker_release(model)
-                elif status == 200:
-                    breaker_record(model, True)
-                elif status in RETRYABLE_UPSTREAM:
-                    breaker_record(model, False)
-                else:
-                    breaker_release(model)
+                breaker_finish(model, status, quota_hit)
 
         retried = False
         fallback = None
