@@ -104,29 +104,16 @@ else
     --allow-private
 fi
 
-echo "Preparing scoped exact native routing..."
-SERVICE_STATE_DIR="${CODEX_ROUTER_STATE_DIR:-$HOME/.codex/codex-router}"
-EXACT_NATIVE_ROUTE=""
-if "$PYTHON" "$HERE/server/patch_codex_router.py" \
-  --router-dir "$ROUTER_DIR" \
-  --state-dir "$SERVICE_STATE_DIR" \
-  --restart; then
-  EXACT_NATIVE_ROUTE="1"
-else
-  echo "WARNING: scoped exact native routing could not be installed; Jev will use the legacy redirect-suppression fallback." >&2
-fi
-
 echo "== 4/8  Jev local service =="
+SERVICE_STATE_DIR="${CODEX_ROUTER_STATE_DIR:-$HOME/.codex/codex-router}"
 if [ -n "${JEV_ENV_FILE:-}" ]; then
   CODEX_ROUTER_DIR="$ROUTER_DIR" \
   CODEX_ROUTER_STATE_DIR="$SERVICE_STATE_DIR" \
-  JEV_EXACT_NATIVE_ROUTE="$EXACT_NATIVE_ROUTE" \
   JEV_ENV_FILE="$JEV_ENV_FILE" \
     bash "$HERE/server/install-service.sh"
 else
   CODEX_ROUTER_DIR="$ROUTER_DIR" \
   CODEX_ROUTER_STATE_DIR="$SERVICE_STATE_DIR" \
-  JEV_EXACT_NATIVE_ROUTE="$EXACT_NATIVE_ROUTE" \
     bash "$HERE/server/install-service.sh"
 fi
 
