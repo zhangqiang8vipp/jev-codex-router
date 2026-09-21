@@ -89,8 +89,9 @@ class ShadowReport(unittest.TestCase):
         second["jev_route"] = None
         result = report.summarize([first, second], {}, {}, 7, 1)
         self.assertEqual(result["jev_decision_turns"], 1)
-        self.assertEqual(result["jev_attempt_turns"], 1)
-        self.assertEqual(result["jev_paid_call_turns"], 1)
+        self.assertEqual(result["jev_error_turns"], 0)
+        self.assertEqual(result["jev_cache_miss_turns"], 1)
+        self.assertEqual(result["jev_cache_reuse_turns"], 0)
         self.assertEqual(result["lease_reuse_turns"], 1)
         self.assertEqual(result["lease_reuse_rate"], 0.5)
 
