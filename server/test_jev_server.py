@@ -406,5 +406,78 @@ class JevTaskInput(unittest.TestCase):
         self.assertEqual(len(state["previous_assistant"]), 240)
 
 
+class RuntimeSafety(unittest.TestCase):
+    def setUp(self):
+        with jev._BREAKER_LOCK:
+            jev._BREAKER.clear()
+        jev._NATIVE_REDIRECT_DEPTH = 0
+
+    def tearDown(self):
+        with jev._BREAKER_LOCK:
+            jev._BREAKER.clear()
+        jev._NATIVE_REDIRECT_DEPTH = 0
+
+    def test_breaker_never_wraps_from_astra_to_a_lower_tier(self):
+        with mock.patch.object(jev.time, "time", return_value=100.0):
+            jev.breaker_record(jev.ASTRA, False)
+            jev.breaker_record(jev.ASTRA, False)
+            model, rerouted = jev.breaker_pick(jev.ASTRA)
+        self.assertIsNone(model)
+        self.assertTrue(rerouted)
+
+    def test_only_one_half_open_probe_is_claimed(self):
+        with mock.patch.object(jev.time, "time", return_value=100.0):
+            jev.breaker_record(jev.LUNA, False)
+            jev.breaker_record(jev.LUNA, False)
+        with mock.patch.object(jev.time, "time", return_value=161.0):
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+            self.assertFalse(jev.breaker_available(jev.LUNA))
+            jev.breaker_release(jev.LUNA)
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+
+    def test_failed_half_open_probe_reopens_for_a_full_cooldown(self):
+        with mock.patch.object(jev.time, "time", return_value=100.0):
+            jev.breaker_record(jev.LUNA, False)
+            jev.breaker_record(jev.LUNA, False)
+        with mock.patch.object(jev.time, "time", return_value=161.0):
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+            jev.breaker_record(jev.LUNA, False)
+        with mock.patch.object(jev.time, "time", return_value=200.0):
+            self.assertFalse(jev.breaker_available(jev.LUNA))
+        with mock.patch.object(jev.time, "time", return_value=222.0):
+            self.assertTrue(jev.breaker_available(jev.LUNA))
+
+    def test_native_redirect_recovers_after_interrupted_suppression(self):
+        with tempfile.TemporaryDirectory() as state, mock.patch.object(jev, "STATE", state):
+            path, held = jev._native_redirect_paths()
+            with open(held, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "model": "jev/auto"}, fh)
+            self.assertTrue(jev.recover_native_redirect())
+            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(held))
+
+    def test_native_redirect_does_not_overwrite_a_newer_operator_choice(self):
+        with tempfile.TemporaryDirectory() as state, mock.patch.object(jev, "STATE", state):
+            path, held = jev._native_redirect_paths()
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "model": "jev/auto"}, fh)
+            with jev.native_redirect_suppressed():
+                self.assertFalse(os.path.exists(path))
+                self.assertTrue(os.path.exists(held))
+                with open(path, "w", encoding="utf-8") as fh:
+                    json.dump({"version": 1, "model": "native/operator-choice"}, fh)
+            with open(path, encoding="utf-8") as fh:
+                restored = json.load(fh)
+            self.assertEqual(restored["model"], "native/operator-choice")
+            self.assertFalse(os.path.exists(held))
+
+    def test_deadline_timeout_is_capped_by_remaining_budget(self):
+        with mock.patch.object(jev.time, "monotonic", return_value=10.0):
+            self.assertEqual(jev._bounded_timeout(12.5, 30.0), 2.5)
+            self.assertEqual(jev._bounded_timeout(100.0, 30.0), 30.0)
+            with self.assertRaises(TimeoutError):
+                jev._bounded_timeout(9.0, 30.0)
+
+
 if __name__ == "__main__":
     unittest.main()
