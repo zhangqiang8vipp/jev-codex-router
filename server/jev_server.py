@@ -68,6 +68,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from auto_control import set_enabled as set_auto_enabled
 from auto_control import status as auto_status
+from route_lease import (RouteLeaseLocks, apply_failure_escalation,
+                         contains_compaction, human_turn_key, lease_fields,
+                         read_lease, route_action)
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
                             TERRA, TIERS, decision_from_answers, route)
 from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
@@ -95,6 +98,7 @@ LOG_PATH = os.path.join(STATE, "jev-router-live.jsonl")
 SHADOW_EVAL_PATH = os.path.join(STATE, "jev-shadow-eval.jsonl")
 SESSION_PATH = os.path.join(STATE, "jev-router-sessions.json")
 SESSION_STORE = SessionStore(SESSION_PATH)
+ROUTE_LEASE_LOCKS = RouteLeaseLocks()
 REPO_PROFILER = RepoProfiler()
 
 def _port_from_env(*names, default):
@@ -116,7 +120,7 @@ ROUTER = ("127.0.0.1", _port_from_env(
     "MODEL_ROUTER_PORT", "CODEX_ROUTER_PORT", default=4202))
 
 DISPLAY_NAME = "Jev Codex Router"
-VERSION = "1.7"
+VERSION = "1.8"
 VIRTUAL_MODEL_ID = "auto"
 VIRTUAL_MODEL_SLUG = "jev/auto"
 VIRTUAL_CONTEXT_WINDOW = 1_050_000
@@ -1553,6 +1557,12 @@ class Handler(BaseHTTPRequestHandler):
         stream_requested = payload.get("stream") is True
         turn_id = new_turn_id()
         session_tag = thread_key[:16] if thread_key else None
+        turn_key = human_turn_key(payload, task=task, session_key=thread_key)
+        compacted = contains_compaction(payload)
+        meaningful_user_turn = (
+            step.get("step_type") == "user_turn"
+            and (bool(task) or bool(signals.get("has_image")))
+        )
         previous_eval_id = session.get("last_eval_id")
         if (step.get("step_type") == "tool_step"
                 and isinstance(previous_eval_id, str) and previous_eval_id):
@@ -1573,52 +1583,121 @@ class Handler(BaseHTTPRequestHandler):
         jev_usage = None
         smart_gate = None
         breaker_blocked = False
-        if os.path.exists(OFF_PATH):
-            model, effort, speed, gate = ASTRA, None, "default", "off"
-        else:
-            key = load_key()
-            if key and (task or step.get("digest") or signals.get("has_image")):
-                jt0 = time.time()
-                state = jev_state(task, prev_assistant, signals, step)
-                state = enrich_jev_state(state, task, session, repo, failure_streak)
-                try:
-                    result, jev_cache = call_jev_for_route(key, state, raw)
-                    decision = decision_from_answers(result.get("answers"))
-                    raw_usage = result.get("usage") or {}
-                    if not isinstance(raw_usage, dict):
-                        raw_usage = {}
-                    jev_usage = (
-                        {k: v for k, v in raw_usage.items()
-                         if k in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
-                         and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
-                        if jev_cache == "miss" else None
+        route_source = None
+        lease_action = None
+        lease_reason = None
+
+        # Serialize only semantic route selection for this session. The lock is
+        # released before the actual model call, so unrelated sessions and the
+        # long upstream stream remain fully concurrent.
+        with ROUTE_LEASE_LOCKS.hold(thread_key):
+            # Another concurrent replay may have created the lease while this
+            # request waited for the per-session decision lock.
+            session = SESSION_STORE.get(thread_key)
+            failure_streak = next_failure_streak(session, step)
+            lease = read_lease(session, POLICY_VERSION)
+            lease_action, lease_reason = route_action(
+                step_type=step.get("step_type") or "other",
+                meaningful_user_turn=meaningful_user_turn,
+                turn_key=turn_key,
+                lease=lease,
+                compacted=compacted,
+            )
+
+            if os.path.exists(OFF_PATH):
+                model, effort, speed, gate = ASTRA, None, "default", "off"
+                route_source = "off"
+                if thread_key:
+                    SESSION_STORE.put(thread_key, failure_streak=failure_streak)
+            elif lease_action == "KEEP" and lease is not None:
+                model, effort, speed = lease.model, lease.effort, "default"
+                model, effort, local_escalation = apply_failure_escalation(
+                    model, effort, failure_streak
+                )
+                route_source = "lease_escalation" if local_escalation else "lease"
+                smart_gate = local_escalation or "lease_keep"
+                gate = f"lease:{lease_reason}"
+                if local_escalation:
+                    gate = f"{gate}+{local_escalation}"
+
+                if thread_key:
+                    SESSION_STORE.put(
+                        thread_key,
+                        failure_streak=failure_streak,
+                        last_model=model,
+                        last_effort=effort,
+                        **lease_fields(
+                            model,
+                            effort,
+                            turn_key=lease.turn_key or turn_key,
+                            source=("local_escalation" if local_escalation else lease.source),
+                            policy_version=POLICY_VERSION,
+                        ),
                     )
-                    tier, depth, conf = (decision["model"], decision["effort"],
-                                         decision["confidence"])
-                    model, effort, speed, gate = route(tier, depth)
-                    model, effort, smart_gate = apply_guardrails(
-                        model, effort, task, step, session, failure_streak)
-                    if smart_gate != "apply":
-                        gate = f"{gate}+{smart_gate}"
-                except Exception as exc:
-                    model, effort, speed, gate = ASTRA, "medium", "default", f"jev_error:{type(exc).__name__}"
-                jev_ms = int((time.time() - jt0) * 1000)
             else:
-                model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
+                key = load_key()
+                if key and (task or step.get("digest") or signals.get("has_image")):
+                    jt0 = time.time()
+                    state = jev_state(task, prev_assistant, signals, step)
+                    state = enrich_jev_state(state, task, session, repo, failure_streak)
+                    try:
+                        result, jev_cache = call_jev_for_route(key, state, raw)
+                        decision = decision_from_answers(result.get("answers"))
+                        raw_usage = result.get("usage") or {}
+                        if not isinstance(raw_usage, dict):
+                            raw_usage = {}
+                        jev_usage = (
+                            {k: v for k, v in raw_usage.items()
+                             if k in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
+                             and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                            if jev_cache == "miss" else None
+                        )
+                        tier, depth, conf = (decision["model"], decision["effort"],
+                                             decision["confidence"])
+                        model, effort, speed, gate = route(tier, depth)
+                        model, effort, smart_gate = apply_guardrails(
+                            model, effort, task, step, session, failure_streak)
+                        if smart_gate != "apply":
+                            gate = f"{gate}+{smart_gate}"
+                        route_source = "jev"
+                    except Exception as exc:
+                        model, effort, speed, gate = (
+                            ASTRA, "medium", "default",
+                            f"jev_error:{type(exc).__name__}"
+                        )
+                        route_source = "jev_error_fallback"
+                    jev_ms = int((time.time() - jt0) * 1000)
+                else:
+                    model, effort, speed, gate = ASTRA, "medium", "default", "no_key_or_task"
+                    route_source = "fallback"
+
+                # Even a technical fallback becomes the continuity route for
+                # this user turn. Otherwise every tool result after one Jev
+                # outage would ask Jev again or accidentally resurrect the
+                # previous task's lease.
+                if thread_key and model in TIERS and effort in EFFORTS:
+                    SESSION_STORE.put(
+                        thread_key,
+                        failure_streak=failure_streak,
+                        last_model=model,
+                        last_effort=effort,
+                        **lease_fields(
+                            model,
+                            effort,
+                            turn_key=turn_key,
+                            source=route_source,
+                            policy_version=POLICY_VERSION,
+                        ),
+                    )
+                elif thread_key:
+                    SESSION_STORE.put(thread_key, failure_streak=failure_streak)
 
         # Capture the production smart route before operational shadow/dry
-        # overrides. The raw Jev route remains tier/depth above.
+        # overrides. The raw Jev route is populated only when this request
+        # actually opened a semantic Jev decision.
         smart_model, smart_effort, smart_speed, smart_route_gate = (
             model, effort, speed, gate
         )
-
-        # Remember only bounded routing state. Operational fail-open paths do
-        # not overwrite the last healthy semantic route.
-        if thread_key:
-            remembered = {"failure_streak": failure_streak}
-            if decision is not None and model in TIERS:
-                remembered.update(last_model=model, last_effort=effort)
-            SESSION_STORE.put(thread_key, **remembered)
 
         would = None
         if os.path.exists(SHADOW_PATH):
