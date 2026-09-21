@@ -1060,7 +1060,7 @@ def log_line(record):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "jev-router/1.2"
+    server_version = "jev-router/1.6"
 
     def log_message(self, *args):
         pass
