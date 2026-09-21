@@ -26,6 +26,21 @@ class SessionIdentity(unittest.TestCase):
         b = smart.session_key({"input": [first, self.user("third")]}, "/repo")
         self.assertEqual(a, b)
 
+    def test_protected_thread_header_wins_over_compacted_history(self):
+        headers = {"Thread-Id": "thread-123"}
+        a = smart.session_key(
+            {"input": [self.user("before", "msg_old")]},
+            "/repo",
+            headers,
+        )
+        b = smart.session_key(
+            {"input": [{"type": "compaction", "id": "cmp_2"}, self.user("after", "msg_new")]},
+            "/repo",
+            headers,
+        )
+        self.assertEqual(a, b)
+        self.assertNotIn("thread-123", a)
+
     def test_environment_cwd_is_read_locally(self):
         payload = {"input": [self.user("<environment_context><cwd>/tmp/project</cwd></environment_context>")]}
         self.assertEqual(smart.extract_cwd(payload), "/tmp/project")
