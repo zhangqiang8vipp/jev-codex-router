@@ -293,8 +293,10 @@ function Prepare-And-VerifyCodexRouterPython([string]$Directory, [bool]$ForceRep
     # that array as a single nested object; casting it to [string] then joins
     # its elements with spaces and turns two requirements into one argv value.
     $requirements = @(
-      & node.exe -e "import('./src/install-plan.mjs').then(m=>m.PYTHON_REQUIREMENTS.forEach(x=>console.log(x)))" 2>$null
-    ) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }
+      @(
+        & node.exe -e "import('./src/install-plan.mjs').then(m=>m.PYTHON_REQUIREMENTS.forEach(x=>console.log(x)))" 2>$null
+      ) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }
+    )
     if ($LASTEXITCODE -ne 0 -or $requirements.Count -eq 0) {
       throw "Could not read Codex Router's pinned Python requirements."
     }
