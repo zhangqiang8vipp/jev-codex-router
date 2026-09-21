@@ -77,18 +77,18 @@ class TurnIdentity(unittest.TestCase):
                 "output": "sensitive failing output",
             }]
         }
-        first = lease.tool_step_key(payload, session_key="session")
-        second = lease.tool_step_key(payload, session_key="session")
+        first = lease.tool_step_key(payload, digest="bounded-tail", session_key="session")
+        second = lease.tool_step_key(payload, digest="bounded-tail", session_key="session")
         self.assertEqual(first, second)
         self.assertNotIn("sensitive", first)
 
     def test_changed_tool_result_gets_a_new_event_key(self):
         a = lease.tool_step_key({
             "input": [{"type": "function_call_output", "call_id": "c", "output": "first"}]
-        }, session_key="s")
+        }, digest="first-tail", session_key="s")
         b = lease.tool_step_key({
             "input": [{"type": "function_call_output", "call_id": "c", "output": "second"}]
-        }, session_key="s")
+        }, digest="second-tail", session_key="s")
         self.assertNotEqual(a, b)
 
 
