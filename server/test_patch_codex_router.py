@@ -67,18 +67,25 @@ class JevExactRouteCapability(unittest.TestCase):
     def tearDown(self):
         jev._exact_native_route_cache = self.old_cache
 
-    def test_capability_requires_supervisor_opt_in_and_patched_source(self):
+    def _armed_fixture(self, root):
+        source_dir = root / "src"
+        source_dir.mkdir()
+        router = source_dir / "router.mjs"
+        router.write_text(
+            upstream_fixture(patcher.PATCHED_CONDITION),
+            encoding="utf-8",
+        )
+        state = root / "state"
+        patcher.write_marker(state, router, patcher.source_sha256(router))
+        return router, state
+
+    def test_capability_requires_supervisor_opt_in_and_matching_arm_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source_dir = root / "src"
-            source_dir.mkdir()
-            router = source_dir / "router.mjs"
-            router.write_text(
-                upstream_fixture(patcher.PATCHED_CONDITION),
-                encoding="utf-8",
-            )
+            router, state = self._armed_fixture(root)
             jev._exact_native_route_cache = None
-            with mock.patch.object(jev, "CODEX_ROUTER_DIR", str(root)):
+            with mock.patch.object(jev, "CODEX_ROUTER_DIR", str(root)), \
+                 mock.patch.object(jev, "STATE", str(state)):
                 with mock.patch.dict(os.environ, {}, clear=False):
                     os.environ.pop(jev._EXACT_NATIVE_ROUTE_ENV, None)
                     self.assertFalse(jev.exact_native_route_supported())
@@ -90,17 +97,33 @@ class JevExactRouteCapability(unittest.TestCase):
                 ):
                     self.assertTrue(jev.exact_native_route_supported())
 
-    def test_capability_falls_back_after_source_loses_patch(self):
+    def test_capability_rejects_unarmed_patched_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source_dir = root / "src"
             source_dir.mkdir()
-            router = source_dir / "router.mjs"
-            router.write_text(
+            (source_dir / "router.mjs").write_text(
                 upstream_fixture(patcher.PATCHED_CONDITION),
                 encoding="utf-8",
             )
+            state = root / "state"
+            state.mkdir()
             with mock.patch.object(jev, "CODEX_ROUTER_DIR", str(root)), \
+                 mock.patch.object(jev, "STATE", str(state)), \
+                 mock.patch.dict(
+                     os.environ,
+                     {jev._EXACT_NATIVE_ROUTE_ENV: "1"},
+                     clear=False,
+                 ):
+                jev._exact_native_route_cache = None
+                self.assertFalse(jev.exact_native_route_supported())
+
+    def test_capability_falls_back_after_source_loses_patch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            router, state = self._armed_fixture(root)
+            with mock.patch.object(jev, "CODEX_ROUTER_DIR", str(root)), \
+                 mock.patch.object(jev, "STATE", str(state)), \
                  mock.patch.dict(
                      os.environ,
                      {jev._EXACT_NATIVE_ROUTE_ENV: "1"},
