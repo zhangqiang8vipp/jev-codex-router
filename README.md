@@ -31,7 +31,7 @@ Codex ──▶ Codex Router (:4202)
                             │    (model, reasoning.effort, service_tier)
                             ▼
                           local caller edge (shared native session)
-                            └──▶ luna / sol / astra on the ChatGPT backend
+                            └──▶ luna / terra / sol / astra on the ChatGPT backend
 ```
 
 - **Responses in, Responses out** — no format conversion; the SSE stream is
@@ -51,11 +51,12 @@ Codex ──▶ Codex Router (:4202)
 
 ## Routing policy
 
-The shared contract in `server/routing_policy.py` gives Jev 15 explicit pairs:
-Luna, Sol or Astra × low, medium, high, xhigh or max thinking. Jev chooses the
-pair in one Choice question, using capability profiles and the current request,
-recent assistant intent, and the available tool result. Every pair uses standard
-speed, overriding an incoming Fast setting, including retries and bypass modes.
+The shared contract in `server/routing_policy.py` gives Jev 20 explicit pairs:
+Luna, Terra, Sol or Astra × low, medium, high, xhigh or max thinking. Jev chooses
+the pair in one Choice question using capability profiles, the current request,
+recent assistant intent, the latest tool evidence, and bounded session/repository
+signals. Every pair uses standard speed, overriding an incoming Fast setting,
+including retries and bypass modes.
 
 There is no preferred model, target distribution, keyword-to-model rule,
 low-confidence fallback to Sol, mechanical-step exception, or compaction pin.
@@ -71,6 +72,22 @@ A missing/invalid Jev response or a provider error still uses the separately
 logged technical fail-open route (Astra at medium); the manual kill switch and
 native-quota exhaustion are operational bypasses, not Jev decisions.
 
+### Smart continuity guardrails
+
+The smart-router branch keeps Jev as the semantic chooser but adds bounded local
+evidence and deterministic recovery rules:
+
+- only a hashed thread key, previous model/effort, failure streak, project basename,
+  dirty-file count and aggregate diff-line count are retained;
+- source code, filenames and absolute paths are not sent to Jev;
+- one failed tool call cannot immediately downgrade model or reasoning effort;
+- two consecutive failed tool steps floor the next call at Sol + high;
+- three floor it at Astra + xhigh, while max remains a Jev decision;
+- a very short continuation can lower model and effort by at most one rung, while
+  a successful mechanical tool continuation may still fall directly to Luna + low.
+
+These are recovery/continuity floors, not keyword-based task classification.
+
 ### Codex-dry tandem — only while native usage is exhausted
 
 The triptych is the policy **unless** the ChatGPT usage window is exhausted
@@ -80,7 +97,7 @@ which also retries the failed call on the tandem). While dry:
 | Native tier | Dry substitute |
 |---|---|
 | `gpt-6-astra` (frontier) | `opencode-go/glm-5.3-flash` |
-| `gpt-5.6-sol` / `gpt-5.6-luna` | `opencode-go/deepseek-v4.1-flash` |
+| `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` | `opencode-go/deepseek-v4.1-flash` |
 
 An automatic flip lasts until the instant the edge announced for the window
 reset, so the first call after the quota returns is served by the triptych
@@ -118,7 +135,7 @@ python3 server/report_routing.py --days 7          # text tables (default window
 python3 server/report_routing.py --days 30 --json  # machine-readable
 ```
 
-It prints the served model distribution (luna/sol/astra, plus the Codex-dry
+It prints the served model distribution (luna/terra/sol/astra, plus the Codex-dry
 tandem when it took over: turns + %), the share of turns served by the cheapest
 tier, the share of turns held below the confidence gate, the gates encountered,
 median latency (end-to-end and Jev's own decision time), and an estimate of the
@@ -218,7 +235,7 @@ cd <codex-router checkout>
       "provider": "jev",
       "listed": true,
       "displayName": "Jev Codex Router",
-      "description": "Auto-routing by Jev: every turn is classified and served by luna, sol or astra at the thinking depth it needs.",
+      "description": "Auto-routing by Jev: every call is served by luna, terra, sol or astra at the reasoning depth it needs.",
       "priority": 95,
       "defaultEffort": "medium",
       "reasoningLevels": [
