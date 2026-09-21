@@ -70,7 +70,7 @@ from auto_control import set_enabled as set_auto_enabled
 from auto_control import status as auto_status
 from route_lease import (RouteLeaseLocks, apply_failure_escalation,
                          contains_compaction, human_turn_key, lease_fields,
-                         read_lease, route_action)
+                         read_lease, route_action, tool_step_key)
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
                             TERRA, TIERS, decision_from_answers, route)
 from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
@@ -1558,24 +1558,12 @@ class Handler(BaseHTTPRequestHandler):
         turn_id = new_turn_id()
         session_tag = thread_key[:16] if thread_key else None
         turn_key = human_turn_key(payload, task=task, session_key=thread_key)
+        tool_key = tool_step_key(payload, session_key=thread_key)
         compacted = contains_compaction(payload)
         meaningful_user_turn = (
             step.get("step_type") == "user_turn"
             and (bool(task) or bool(signals.get("has_image")))
         )
-        previous_eval_id = session.get("last_eval_id")
-        if (step.get("step_type") == "tool_step"
-                and isinstance(previous_eval_id, str) and previous_eval_id):
-            append_shadow_event(
-                SHADOW_EVAL_PATH,
-                build_tool_feedback(
-                    at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    turn_id=previous_eval_id,
-                    session=session_tag,
-                    errored=bool(step.get("errored")),
-                ),
-            )
-
         tier = depth = conf = None
         jev_ms = None
         jev_cache = None
@@ -1586,6 +1574,8 @@ class Handler(BaseHTTPRequestHandler):
         route_source = None
         lease_action = None
         lease_reason = None
+        tool_replay = False
+        lease_synced_to_served = False
 
         # Serialize only semantic route selection for this session. The lock is
         # released before the actual model call, so unrelated sessions and the
@@ -1594,8 +1584,46 @@ class Handler(BaseHTTPRequestHandler):
             # Another concurrent replay may have created the lease while this
             # request waited for the per-session decision lock.
             session = SESSION_STORE.get(thread_key)
-            failure_streak = next_failure_streak(session, step)
+            previous_failure_streak = session.get("failure_streak", 0)
+            previous_failure_streak = (
+                previous_failure_streak
+                if isinstance(previous_failure_streak, int) and previous_failure_streak >= 0
+                else 0
+            )
+            tool_replay = (
+                step.get("step_type") == "tool_step"
+                and bool(tool_key)
+                and session.get("last_tool_step_key") == tool_key
+            )
+            failure_streak = (
+                previous_failure_streak
+                if tool_replay
+                else next_failure_streak(session, step)
+            )
             lease = read_lease(session, POLICY_VERSION)
+
+            # Feedback and failure state are event-based, not transport-replay
+            # based. An identical replay must not count the same failed tool
+            # result twice or emit duplicate feedback.
+            previous_eval_id = session.get("last_eval_id")
+            if (step.get("step_type") == "tool_step"
+                    and not tool_replay
+                    and isinstance(previous_eval_id, str) and previous_eval_id):
+                append_shadow_event(
+                    SHADOW_EVAL_PATH,
+                    build_tool_feedback(
+                        at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        turn_id=previous_eval_id,
+                        session=session_tag,
+                        errored=bool(step.get("errored")),
+                    ),
+                )
+
+            continuity_fields = {"failure_streak": failure_streak}
+            if step.get("step_type") == "tool_step" and tool_key:
+                continuity_fields["last_tool_step_key"] = tool_key
+            elif step.get("step_type") == "user_turn":
+                continuity_fields["last_tool_step_key"] = None
             lease_action, lease_reason = route_action(
                 step_type=step.get("step_type") or "other",
                 meaningful_user_turn=meaningful_user_turn,
@@ -1691,6 +1719,9 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 elif thread_key:
                     SESSION_STORE.put(thread_key, failure_streak=failure_streak)
+
+            if thread_key:
+                SESSION_STORE.put(thread_key, **continuity_fields)
 
         # Capture the production smart route before operational shadow/dry
         # overrides. The raw Jev route is populated only when this request
@@ -1858,6 +1889,34 @@ class Handler(BaseHTTPRequestHandler):
         )
         if request_completed:
             invalidate_route_cache(raw)
+
+            # Tool-result continuity should follow the physical native model
+            # that actually completed the previous call. If a breaker or
+            # retry escalated Sol -> Astra, keep Astra for the rest of this
+            # human turn without asking Jev again. Guard the write with the
+            # semantic lock and turn key so a slow old turn cannot overwrite
+            # a newer user's route lease.
+            if (thread_key and model in TIERS and effort in EFFORTS
+                    and not os.path.exists(SHADOW_PATH)):
+                with ROUTE_LEASE_LOCKS.hold(thread_key):
+                    latest_session = SESSION_STORE.get(thread_key)
+                    latest_lease = read_lease(latest_session, POLICY_VERSION)
+                    if (latest_lease is not None
+                            and latest_lease.turn_key == turn_key
+                            and (latest_lease.model, latest_lease.effort) != (model, effort)):
+                        SESSION_STORE.put(
+                            thread_key,
+                            last_model=model,
+                            last_effort=effort,
+                            **lease_fields(
+                                model,
+                                effort,
+                                turn_key=latest_lease.turn_key,
+                                source="served_continuity",
+                                policy_version=POLICY_VERSION,
+                            ),
+                        )
+                        lease_synced_to_served = True
         total_ms = int((time.time() - t0) * 1000)
         finished_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         log_line({
@@ -1870,6 +1929,8 @@ class Handler(BaseHTTPRequestHandler):
             "route_source": route_source,
             "lease_action": lease_action,
             "lease_reason": lease_reason,
+            "tool_replay": tool_replay,
+            "lease_synced_to_served": lease_synced_to_served,
             "compacted": compacted,
             "turn": turn_key[:10] if turn_key else None,
             "attempts": self._attempts,
