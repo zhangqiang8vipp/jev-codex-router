@@ -12,7 +12,7 @@ internal sealed class RouterControlClient : IDisposable
     private readonly HttpClient _http = new()
     {
         BaseAddress = new Uri("http://127.0.0.1:4319/"),
-        Timeout = TimeSpan.FromSeconds(3)
+        Timeout = TimeSpan.FromSeconds(12)
     };
 
     public async Task<AutoSnapshot> GetStatusAsync(CancellationToken cancellationToken)
