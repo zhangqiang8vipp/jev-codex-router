@@ -54,6 +54,19 @@ class TurnIdentity(unittest.TestCase):
         self.assertIsInstance(key, str)
         self.assertNotIn("secret", key)
 
+    def test_image_only_user_turn_without_id_still_has_a_replay_key(self):
+        payload = {
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}],
+            }]
+        }
+        first = lease.human_turn_key(payload, task="", session_key="session")
+        second = lease.human_turn_key(payload, task="", session_key="session")
+        self.assertIsInstance(first, str)
+        self.assertEqual(first, second)
+        self.assertNotIn("data:image", first)
+
 
 class LeasePolicy(unittest.TestCase):
     def make_lease(self, turn_key="t"):
