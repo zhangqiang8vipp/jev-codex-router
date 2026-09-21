@@ -119,6 +119,10 @@ meaningful new user turn
 Important rules:
 
 - A tool call/result loop reuses the physical route.
+- If breaker/retry escalation actually completes on a stronger native model,
+  that served model becomes the continuity route for the rest of the human turn.
+- Transport replay of an identical tool result does not increment failure
+  evidence twice.
 - Compaction does **not** invalidate the route lease.
 - Repeated failures may raise the lease locally without another Jev call.
 - A duplicate/replayed copy of the same user turn reuses the existing semantic
@@ -288,7 +292,8 @@ depending on how many real execution boundaries the task crosses.
 
 ### Phase 1 — Route Lease
 
-Status: current implementation target.
+Status: baseline implemented in this repository; validate on real Codex sessions
+before adding semantic phase detection.
 
 - stable privacy-preserving session/turn identity;
 - one Jev decision per meaningful user turn in v1;
