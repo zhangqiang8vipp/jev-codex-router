@@ -50,8 +50,9 @@ compaction. Capability profiles are priors; outcome quality requires evaluation.
 Log: ~/.codex/codex-router/jev-router-live.jsonl
 
 Auto routing is OpenAI-only: the served model must remain one of the four
-native tiers (Luna, Terra, Sol, Astra). Native quota failures are returned to
-the caller as-is; Jev never substitutes a third-party model.
+native tiers (Luna, Terra, Sol, Astra). Terminal native quota failures are
+carried across the generic-provider hop as a non-retryable Responses failure;
+Jev never substitutes a third-party model.
 """
 import codecs
 import hashlib
@@ -173,7 +174,7 @@ TERMINAL_QUOTA_HEADERS = frozenset({
 })
 
 # The events that close a Responses stream and repeat the response id it opened
-# with. A relayed (tandem) stream is rewritten onto that opening id.
+# with. A relayed stream is rewritten onto that opening id.
 TERMINAL_EVENT_TYPES = ("response.completed", "response.incomplete", "response.failed")
 
 ERROR_RX = re.compile(
@@ -1068,7 +1069,7 @@ def log_line(record):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "jev-router/1.6"
+    server_version = f"jev-router/{VERSION}"
 
     def log_message(self, *args):
         pass
