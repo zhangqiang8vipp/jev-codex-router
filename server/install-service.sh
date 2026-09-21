@@ -47,5 +47,20 @@ sleep 1.5
 if curl -s -m 5 http://127.0.0.1:4319/health; then
   echo ""
   echo "— Jev Router service OK ($LABEL)"
+else
+  echo "Jev Router did not answer /health; inspect $LOGDIR/jev-router.err.log"
+  exit 1
 fi
+
+echo ""
+echo "Running end-to-end readiness checks (TypeSafe + caller secret + Codex Router)..."
+"$PYTHON" "$REPO/server/jev_server.py" --check || {
+  echo ""
+  echo "Service is installed, but one or more prerequisites are not ready."
+  echo "Fix the failed check above, then run:"
+  echo "  $PYTHON $REPO/server/jev_server.py --check"
+  exit 1
+}
+
+echo ""
 echo "Uninstall: launchctl bootout gui/\$(id -u)/$LABEL"
