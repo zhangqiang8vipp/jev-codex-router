@@ -68,7 +68,9 @@ def actual_credits(event):
         else:
             total += value
             priced += 1
-    return (total if priced else None), priced, unpriced
+    # A partially priced turn would understate real cost (for example a native
+    # attempt followed by an external fallback). Keep it unknown instead.
+    return (total if priced and not unpriced else None), priced, unpriced
 
 
 def median(values):
@@ -179,6 +181,7 @@ def summarize(turns, feedback, stats, days, min_turns):
             "cached_input_tokens": 0,
             "actual_credits": 0.0,
             "priced_turns": 0,
+            "priced_successes": 0,
             "served_pairs": {},
         })
         row["turns"] += 1
@@ -200,6 +203,7 @@ def summarize(turns, feedback, stats, days, min_turns):
         if credits is not None:
             row["actual_credits"] += credits
             row["priced_turns"] += 1
+            row["priced_successes"] += int(success)
         row["served_pairs"][served] = row["served_pairs"].get(served, 0) + 1
 
         if raw != "(none)" and smart != "(none)":
@@ -230,7 +234,10 @@ def summarize(turns, feedback, stats, days, min_turns):
         input_n = row["input_tokens"]
         success_rate = row["successes"] / turns_n if turns_n else 0.0
         avg_credits = row["actual_credits"] / row["priced_turns"] if row["priced_turns"] else None
-        cost_per_success = row["actual_credits"] / row["successes"] if row["successes"] and row["priced_turns"] else None
+        cost_per_success = (
+            row["actual_credits"] / row["priced_successes"]
+            if row["priced_successes"] else None
+        )
         pair_rows.append({
             "pair": row["pair"],
             "turns": turns_n,
