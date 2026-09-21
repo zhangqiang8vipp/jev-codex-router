@@ -276,7 +276,8 @@ Before changing routing behaviour, preserve these invariants:
 - no raw prompt, tool output or absolute path is persisted in lease metadata.
 
 Use the Shadow Eval report to inspect `route_sources`, `lease_reuse_turns`,
-`jev_decision_turns`, `jev_attempt_turns` and `jev_paid_call_turns`.
+`jev_decision_turns`, `jev_error_turns`, `jev_cache_miss_turns` and
+`jev_cache_reuse_turns`.
 
 ## Tests
 
