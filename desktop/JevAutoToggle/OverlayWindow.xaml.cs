@@ -79,7 +79,9 @@ public partial class OverlayWindow : Window
             SetResource("Pill", Border.BorderBrushProperty, "OffBorder");
             SetResource("Label", TextBlock.ForegroundProperty, "OffText");
             SetResource("StatusDot", System.Windows.Shapes.Shape.FillProperty, "OffDot");
-            AutoButton.ToolTip = "Auto OFF\nCodex native model + reasoning controls are active.";
+            AutoButton.ToolTip = string.IsNullOrWhiteSpace(snapshot.RedirectModel)
+                ? "Auto OFF\nCodex native model + reasoning controls are active."
+                : $"Auto OFF\nRestored Codex Router redirect: {snapshot.RedirectModel}";
         }
     }
 
