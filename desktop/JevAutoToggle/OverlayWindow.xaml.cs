@@ -42,8 +42,8 @@ public partial class OverlayWindow : Window
         var anchorTop = anchor.Bounds.Top / scale;
         var anchorHeight = anchor.Bounds.Height / scale;
 
-        Left = Math.Max(4, anchorLeft - Width - 8);
-        Top = Math.Max(4, anchorTop + (anchorHeight - Height) / 2.0);
+        Left = anchorLeft - Width - 8;
+        Top = anchorTop + (anchorHeight - Height) / 2.0;
     }
 
     internal void SetState(AutoSnapshot snapshot, bool busy)
