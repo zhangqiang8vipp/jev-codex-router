@@ -50,6 +50,7 @@ try {
   $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if ($existing) {
     try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch {}
+    Start-Sleep -Milliseconds 400
   }
 
   if (Test-Path -LiteralPath $publishDir) {
