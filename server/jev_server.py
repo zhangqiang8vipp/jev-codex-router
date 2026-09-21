@@ -1325,11 +1325,21 @@ class Handler(BaseHTTPRequestHandler):
         # Mutating native redirect while it is temporarily held would make an
         # OFF click look successful and then be undone when the forward exits.
         # Fail explicitly; the UI can retry after the in-flight turn completes.
-        if native_redirect_suppression_active():
+        # Make the idle check and redirect mutation atomic against a new
+        # suppression starting in another request. Holding this lock across the
+        # control subprocess is acceptable: Auto toggles are rare, while routed
+        # forwards only need the lock for their short file transition.
+        busy = False
+        with _NATIVE_REDIRECT_LOCK:
+            if _NATIVE_REDIRECT_DEPTH > 0:
+                busy = True
+                result = None
+            else:
+                result = set_auto_enabled(STATE, CODEX_ROUTER_DIR, body["enabled"])
+        if busy:
             payload = self._auto_status()
             payload["error"] = "routing request in flight; retry Auto toggle shortly"
             return self._json(503, payload)
-        result = set_auto_enabled(STATE, CODEX_ROUTER_DIR, body["enabled"])
         payload = result.as_dict()
         payload["route"] = last_route_status() or None
         payload["policy_version"] = POLICY_VERSION
@@ -1620,8 +1630,14 @@ class Handler(BaseHTTPRequestHandler):
                 # success and not a reason to probe another tier.
                 if quota_hit:
                     breaker_release(attempt_model)
+                elif status == 200:
+                    breaker_record(attempt_model, True)
+                elif status in RETRYABLE_UPSTREAM:
+                    breaker_record(attempt_model, False)
                 else:
-                    breaker_record(attempt_model, status == 200)
+                    # 4xx/protocol rejections are request-specific, not proof
+                    # that the physical model is unhealthy.
+                    breaker_release(attempt_model)
                 if status == 200:
                     break
 
@@ -1656,12 +1672,26 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 apply_route(payload, model, effort)
                 with native_redirect_suppressed():
-                    status, out_kind, ctype, quota_hit, _u, _r, error_bytes = self._forward(
-                        payload, out_path, stream_requested, debug, marker, model, signature)
+                    try:
+                        status, out_kind, ctype, quota_hit, _u, _r, error_bytes = self._forward(
+                            payload, out_path, stream_requested, debug, marker, model, signature)
+                    except (BrokenPipeError, ConnectionResetError):
+                        breaker_release(model)
+                        raise
+                    except ResponseCommittedError:
+                        breaker_record(model, False)
+                        raise
+                    except (http.client.HTTPException, ConnectionError, OSError):
+                        breaker_record(model, False)
+                        raise
                 if quota_hit:
                     breaker_release(model)
+                elif status == 200:
+                    breaker_record(model, True)
+                elif status in RETRYABLE_UPSTREAM:
+                    breaker_record(model, False)
                 else:
-                    breaker_record(model, status == 200)
+                    breaker_release(model)
 
         retried = False
         fallback = None
