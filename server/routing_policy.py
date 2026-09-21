@@ -30,7 +30,7 @@ QUESTIONS = {
     "route": {
         "type": "choice",
         "instructions": {
-            "question": "Which model AND reasoning effort together best fit the next model call?",
+            "question": "Which model AND reasoning effort should be leased for the current execution phase?",
             "objective": (
                 "Select the cheapest model/effort pair that is sufficiently capable for the "
                 "current user turn or execution phase, not merely the next trivial tool call. "
