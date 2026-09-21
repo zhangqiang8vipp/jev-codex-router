@@ -9,6 +9,7 @@ internal sealed class OverlayController : IDisposable
     private readonly OverlayWindow _overlay = new();
     private readonly CodexUiTracker _tracker = new();
     private readonly RouterControlClient _router = new();
+    private readonly OverlayDiagnostics _diagnostics = new();
     private readonly DispatcherTimer _uiTimer;
     private readonly DispatcherTimer _statusTimer;
     private readonly CancellationTokenSource _cts = new();
@@ -55,14 +56,16 @@ internal sealed class OverlayController : IDisposable
             anchor = null;
         }
 
-        if (anchor is null || !NativeWindowStyles.IsForegroundProcess(anchor.ProcessId))
+        if (anchor is null)
         {
             _overlay.Hide();
+            _diagnostics.Write(false, null, _snapshot, "reasoning anchor not found in foreground window");
             return;
         }
 
         _overlay.SetAnchor(anchor);
         if (!_overlay.IsVisible) _overlay.Show();
+        _diagnostics.Write(true, anchor.Label, _snapshot);
     }
 
     private async Task RefreshStatusAsync()
@@ -87,6 +90,7 @@ internal sealed class OverlayController : IDisposable
         }
 
         _overlay.SetState(_snapshot, _busy);
+        _diagnostics.Write(_overlay.IsVisible, null, _snapshot);
     }
 
     private async void OnToggleRequested(object? sender, EventArgs e)
