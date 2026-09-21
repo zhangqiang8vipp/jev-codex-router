@@ -6,14 +6,16 @@ secret into chat.
 
 ## What this project does
 
-`jev/auto` is a local Codex model backed by Jev (TypeSafe System One). Jev
-chooses one of 20 model/effort pairs:
+`jev/auto` is a local Codex routing runtime backed by Jev (TypeSafe System
+One) for semantic REPLAN decisions. Jev chooses one of 20 model/effort pairs:
 
 - Luna / Terra / Sol / Astra
 - low / medium / high / xhigh / max
 
-Local smart guardrails may raise or hold that route after observed tool
-failures or across short continuations. The request is executed once.
+A meaningful user turn establishes a persisted Route Lease. Tool,
+background and compaction continuations KEEP that route without another Jev
+call. Repeated tool failures may raise the lease locally. The request is
+executed once. See `VISION.md` for the session-aware runtime direction.
 
 Production Shadow Eval records the raw Jev route, smart route, actually served
 route, numeric usage/cache counters, latency, retries, terminal outcome and
@@ -42,6 +44,14 @@ next-turn tool success/error. It never replays a second model route.
    applies a guarded one-line caller-edge patch so that exact probe bypasses
    only `native-redirect` for that request. Keep file suppression only as the
    compatibility fallback when that scoped hook is unavailable.
+10. **Do not call Jev merely because Codex emitted another Responses call.**
+    A valid Route Lease must be reused for tool/background/compaction
+    continuations. A meaningful new user turn or missing/invalid lease may
+    REPLAN.
+11. Compaction is a context lifecycle event, not a route boundary. It must not
+    invalidate a valid Route Lease.
+12. Repeated tool failures escalate locally (two → at least Sol/high; three →
+    at least Astra/xhigh) without an extra Jev decision.
 
 ## Prerequisites
 
@@ -163,8 +173,9 @@ Raw eval events:
 
 Each production turn records:
 
-- raw Jev model + effort;
-- smart model + effort after local guardrails;
+- route source/reason (Jev REPLAN, lease KEEP, local escalation, fallback);
+- raw Jev model + effort when a Jev decision actually occurred;
+- smart model + effort after local continuity/guardrails;
 - actually served model + effort after operational fallback;
 - Responses terminal outcome and HTTP status;
 - upstream attempt count and retry count;
@@ -250,6 +261,22 @@ Before changing `server/routing_policy.py` or `server/smart_context.py`:
 
 Keep raw Jev judgments in telemetry so thresholds and policy composition can be
 reanalyzed without rerunning inference.
+
+## Route Lease verification
+
+Before changing routing behaviour, preserve these invariants:
+
+- one meaningful user turn can create at most one semantic Jev decision after
+  duplicate/concurrent replay coalescing;
+- tool continuations reuse the current lease;
+- compaction/background calls reuse the current lease;
+- repeated failure escalation does not call Jev;
+- a new meaningful user turn invalidates the prior semantic lease;
+- a policy-version mismatch invalidates persisted leases;
+- no raw prompt, tool output or absolute path is persisted in lease metadata.
+
+Use the Shadow Eval report to inspect `route_sources`, `lease_reuse_turns`,
+`jev_decision_turns`, `jev_attempt_turns` and `jev_paid_call_turns`.
 
 ## Tests
 
