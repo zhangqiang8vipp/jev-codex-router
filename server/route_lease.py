@@ -138,6 +138,34 @@ def contains_compaction(payload: Dict[str, Any]) -> bool:
     return any(isinstance(item, dict) and item.get("type") == "compaction" for item in inp)
 
 
+def tool_step_key(
+    payload: Dict[str, Any],
+    *,
+    session_key: Optional[str] = None,
+) -> Optional[str]:
+    """Privacy-preserving identity for the latest tool-result continuation.
+
+    Codex can replay an identical Responses request after transport trouble.
+    Failure streaks must advance for a new tool result, not for every replay of
+    the same result. Only the digest is persisted.
+    """
+    inp = payload.get("input")
+    if not isinstance(inp, list) or not inp:
+        return None
+    last = inp[-1]
+    if not isinstance(last, dict):
+        return None
+    if last.get("type") not in ("function_call_output", "custom_tool_call_output"):
+        return None
+    try:
+        encoded = json.dumps(last, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        encoded = str(last.get("call_id") or last.get("type") or "tool_step")
+    digest = hashlib.sha256(encoded.encode("utf-8", "replace")).hexdigest()
+    seed = f"{session_key or ''}|tool:{digest}"
+    return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
+
+
 @dataclass(frozen=True)
 class RouteLease:
     model: str
