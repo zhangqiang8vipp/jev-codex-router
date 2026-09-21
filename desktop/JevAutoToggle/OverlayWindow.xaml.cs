@@ -95,7 +95,8 @@ public partial class OverlayWindow : Window
 
     private void SetResource(string name, DependencyProperty property, string resource)
     {
-        if (FindName(name) is not DependencyObject target) return;
+        AutoButton.ApplyTemplate();
+        if (AutoButton.Template.FindName(name, AutoButton) is not DependencyObject target) return;
         target.SetValue(property, FindResource(resource) as Brush);
     }
 
