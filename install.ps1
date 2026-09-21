@@ -15,6 +15,7 @@ $ProgressPreference = "SilentlyContinue"
 $RepoOwner = "zhangqiang8vipp"
 $RepoName = "jev-codex-router"
 $ArchiveUrl = "https://github.com/$RepoOwner/$RepoName/archive/refs/heads/$Branch.zip"
+$CodexRouterInstallUrl = "https://raw.githubusercontent.com/duolahypercho/codex-router/main/install.ps1"
 
 if ($env:OS -ne "Windows_NT") {
   throw "This bootstrap installer is for Windows PowerShell. On macOS/Linux use setup-local.sh."
@@ -84,40 +85,87 @@ function Ensure-Dependency(
   }
 }
 
-function Resolve-RouterCheckout([string]$Explicit) {
-  $candidates = New-Object System.Collections.Generic.List[string]
+function Test-RouterCheckout([string]$Directory) {
+  if ([string]::IsNullOrWhiteSpace($Directory)) { return $false }
+  try { $root = [IO.Path]::GetFullPath($Directory) } catch { return $false }
+  return (
+    (Test-Path -LiteralPath (Join-Path $root "model-router.ps1") -PathType Leaf) -and
+    (Test-Path -LiteralPath (Join-Path $root "src\control.mjs") -PathType Leaf)
+  )
+}
 
-  if (-not [string]::IsNullOrWhiteSpace($Explicit)) { [void]$candidates.Add($Explicit) }
-  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_ROUTER_DIR)) { [void]$candidates.Add($env:CODEX_ROUTER_DIR) }
+function Install-CodexRouterCheckout {
+  $localAppData = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $env:LOCALAPPDATA
+  } else {
+    Join-Path $HOME "AppData\Local"
+  }
+  $target = Join-Path $localAppData "codex-router"
+  $temp = Join-Path ([IO.Path]::GetTempPath()) ("codex-router-install-" + [Guid]::NewGuid().ToString("N") + ".ps1")
+
+  try {
+    Write-Step "Codex Router not found; installing the base router automatically"
+    Invoke-WebRequest -Uri $CodexRouterInstallUrl -OutFile $temp
+
+    # Install the upstream router in credential-free idle mode. Jev setup below
+    # adds the only provider we need and enables the shared ChatGPT session.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $temp \
+      -Target codex \
+      -NoProvider \
+      -NoDiscovery \
+      -NoTray \
+      -InstallDir $target
+
+    if ($LASTEXITCODE -ne 0) {
+      throw "Codex Router installer exited with status $LASTEXITCODE."
+    }
+
+    if (-not (Test-RouterCheckout $target)) {
+      throw "Codex Router installer completed but the managed checkout was not found at $target."
+    }
+
+    return [IO.Path]::GetFullPath($target)
+  } finally {
+    if (Test-Path -LiteralPath $temp) {
+      Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Resolve-RouterCheckout([string]$Explicit) {
+  if (-not [string]::IsNullOrWhiteSpace($Explicit)) {
+    if (-not (Test-RouterCheckout $Explicit)) {
+      throw "The supplied RouterDir is not a Codex Router checkout: $Explicit"
+    }
+    return [IO.Path]::GetFullPath($Explicit)
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_ROUTER_DIR)) {
+    if (-not (Test-RouterCheckout $env:CODEX_ROUTER_DIR)) {
+      throw "CODEX_ROUTER_DIR is set but is not a Codex Router checkout: $env:CODEX_ROUTER_DIR"
+    }
+    return [IO.Path]::GetFullPath($env:CODEX_ROUTER_DIR)
+  }
+
+  $localAppData = if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $env:LOCALAPPDATA
+  } else {
+    Join-Path $HOME "AppData\Local"
+  }
 
   foreach ($candidate in @(
+    (Join-Path $localAppData "codex-router"),
     (Join-Path $HOME "Documents\GitHub\codex-router"),
     (Join-Path $HOME "GitHub\codex-router"),
     (Join-Path $HOME "source\repos\codex-router"),
     (Join-Path $HOME "codex-router")
-  )) { [void]$candidates.Add($candidate) }
-
-  foreach ($candidate in $candidates) {
-    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-    try { $root = [IO.Path]::GetFullPath($candidate) } catch { continue }
-    if (
-      (Test-Path -LiteralPath (Join-Path $root "model-router.ps1") -PathType Leaf) -and
-      (Test-Path -LiteralPath (Join-Path $root "src\control.mjs") -PathType Leaf)
-    ) { return $root }
-  }
-
-  if (-not $NoPrompt) {
-    $typed = Read-Host "Codex Router checkout path (folder containing model-router.ps1)"
-    if (-not [string]::IsNullOrWhiteSpace($typed)) {
-      $root = [IO.Path]::GetFullPath($typed)
-      if (
-        (Test-Path -LiteralPath (Join-Path $root "model-router.ps1") -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $root "src\control.mjs") -PathType Leaf)
-      ) { return $root }
+  )) {
+    if (Test-RouterCheckout $candidate) {
+      return [IO.Path]::GetFullPath($candidate)
     }
   }
 
-  throw "Codex Router checkout was not found. Set CODEX_ROUTER_DIR to the folder containing model-router.ps1, then rerun."
+  return Install-CodexRouterCheckout
 }
 
 function Protect-KeyFile([string]$Path) {
@@ -295,6 +343,7 @@ Write-Host ""
 Write-Host "Jev Codex Router bootstrap installer" -ForegroundColor Green
 Write-Host "Repository: https://github.com/$RepoOwner/$RepoName"
 
+Ensure-Dependency "Git" { [bool](Get-Command git.exe -ErrorAction SilentlyContinue) } "Git.Git" "Install Git for Windows and rerun."
 Ensure-Dependency "Node.js" { [bool](Get-Command node.exe -ErrorAction SilentlyContinue) } "OpenJS.NodeJS.LTS" "Install Node.js LTS and rerun."
 Ensure-Dependency "Python 3" { [bool](Get-Command py.exe -ErrorAction SilentlyContinue) -or [bool](Get-Command python.exe -ErrorAction SilentlyContinue) } "Python.Python.3.12" "Install Python 3.11+ and rerun."
 Ensure-Dependency ".NET 8 SDK" { Test-DotNet8 } "Microsoft.DotNet.SDK.8" "Install the .NET 8 SDK and rerun."
