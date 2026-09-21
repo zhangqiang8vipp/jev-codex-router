@@ -8,6 +8,45 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Test-RouterRoot([string]$Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+  try { $root = [IO.Path]::GetFullPath($Path.Trim()) } catch { return $false }
+  return Test-Path -LiteralPath (Join-Path $root "src\control.mjs") -PathType Leaf
+}
+
+function Resolve-RouterRoot([string]$Explicit, [string]$StateDirectory) {
+  $candidates = New-Object System.Collections.Generic.List[string]
+  if (-not [string]::IsNullOrWhiteSpace($Explicit)) { [void]$candidates.Add($Explicit) }
+  if (-not [string]::IsNullOrWhiteSpace($env:CODEX_ROUTER_DIR)) {
+    [void]$candidates.Add($env:CODEX_ROUTER_DIR)
+  }
+
+  $saved = Join-Path $StateDirectory "jev-router-dir.txt"
+  if (Test-Path -LiteralPath $saved -PathType Leaf) {
+    try {
+      $value = (Get-Content -LiteralPath $saved -Raw -ErrorAction Stop).Trim()
+      if ($value) { [void]$candidates.Add($value) }
+    } catch {}
+  }
+
+  if ($env:LOCALAPPDATA) { [void]$candidates.Add((Join-Path $env:LOCALAPPDATA "codex-router")) }
+  foreach ($candidate in @(
+    (Join-Path $HOME "Documents\GitHub\codex-router"),
+    (Join-Path $HOME "GitHub\codex-router"),
+    (Join-Path $HOME "source\repos\codex-router"),
+    (Join-Path $HOME "codex-router")
+  )) {
+    [void]$candidates.Add($candidate)
+  }
+
+  foreach ($candidate in $candidates) {
+    if (Test-RouterRoot $candidate) {
+      return [IO.Path]::GetFullPath($candidate.Trim())
+    }
+  }
+  throw "Codex Router checkout could not be resolved. Re-run setup-local.ps1 once to persist RouterDir."
+}
+
 function Resolve-Python {
   $py = Get-Command py.exe -ErrorAction SilentlyContinue
   if ($py) {
@@ -35,9 +74,8 @@ if (-not [string]::IsNullOrWhiteSpace($JevEnvFile)) {
   $env:JEV_ENV_FILE = [IO.Path]::GetFullPath($JevEnvFile)
 }
 $env:CODEX_ROUTER_STATE_DIR = $StateDir
-if (-not [string]::IsNullOrWhiteSpace($RouterDir)) {
-  $env:CODEX_ROUTER_DIR = [IO.Path]::GetFullPath($RouterDir)
-}
+$RouterDir = Resolve-RouterRoot $RouterDir $StateDir
+$env:CODEX_ROUTER_DIR = $RouterDir
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
