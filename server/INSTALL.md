@@ -8,36 +8,66 @@ shared ChatGPT session.
 
 ## One-command local setup
 
-Prefer the repository-level installer when wiring a fresh Mac:
+### Windows
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
+  -RouterDir "C:\absolute\path\to\codex-router"
+```
+
+The Windows installer registers two per-user Scheduled Tasks:
+
+- `Jev Codex Router`: hidden background service, starts at logon and has a
+  one-minute heartbeat with `IgnoreNew` to recover from crashes without
+  spawning duplicates.
+- `Jev Codex Router Shadow Eval`: daily 03:15 rolling 7-day report with
+  `StartWhenAvailable`.
+
+It then registers the loopback generic Responses provider, discovers
+`jev/auto`, curates all five effort levels, applies the router overlay and runs
+the full readiness check.
+
+### macOS
 
 ```bash
 bash setup-local.sh /absolute/path/to/codex-router
 ```
 
-It uses the current Codex Router CLI (`bin/model-router codex ...`) to register
-the loopback generic Responses provider, starts this launchd service, discovers
-the virtual model from `/v1/models`, curates `jev/auto` with the five supported
-effort levels, restarts the router, and runs the full five-part readiness check.
-
 ## Lifecycle
+
+### Windows
+
+| Action | Command |
+|---|---|
+| Full readiness | `py -3 server\jev_server.py --check` |
+| Shadow report now | `py -3 server\report_shadow_eval.py --days 7 --write` |
+| Service status | `Get-ScheduledTask -TaskName "Jev Codex Router"` |
+| Eval status | `Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"` |
+| Restart service | `Stop-ScheduledTask -TaskName "Jev Codex Router"; Start-ScheduledTask -TaskName "Jev Codex Router"` |
+| Uninstall both tasks | `.\server\uninstall-service.ps1` |
+
+### macOS
 
 | Action | Command |
 |---|---|
 | Decision log | `tail -f ~/.codex/codex-router/jev-router-live.jsonl` |
-| Kill switch (no Jev → frontier) | `touch ~/.codex/codex-router/jev-router.off` / `rm` to re-enable |
 | Readiness check | `python3 server/jev_server.py --check` |
-| Install the launchd service | `bash server/install-service.sh` (in your own Terminal) |
+| Install launchd | `bash server/install-service.sh` |
 | Service status | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` |
-| Service restart | `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
-| Watchdog (no launchd) | `server/watchdog.sh`, e.g. cron every 5 min |
-| Hide the model | `./bin/control picker set jev/auto hide` (router checkout) |
-| Disable the provider | `./bin/model-router codex providers generic disable jev` |
-| Revoke native sharing | `./bin/model-router codex chatgpt-session disable` |
 
 ## Key setup
 
-For a persistent macOS service, store the TypeSafe key in a file because launchd
-does not inherit an interactive shell's `TYPESAFE_API_KEY`:
+Both platforms default to `~/.hermes/.env`. The secret stays in that file;
+Windows Scheduled Tasks receive only its path, never the key value.
+
+Windows:
+
+```powershell
+New-Item -ItemType Directory -Force (Join-Path $HOME ".hermes") | Out-Null
+Set-Content -Path (Join-Path $HOME ".hermes\.env") -Value "TYPESAFE_API_KEY=YOUR_KEY"
+```
+
+macOS:
 
 ```bash
 mkdir -p ~/.hermes
@@ -49,7 +79,8 @@ To use another file, set `JEV_ENV_FILE=/path/to/env` when running
 `server/install-service.sh`; the installer persists only that path in the
 launchd plist, never the key itself.
 
-Run `python3 server/jev_server.py --check` at any time. It checks the key,
+Run `py -3 server\jev_server.py --check` on Windows or
+`python3 server/jev_server.py --check` on macOS at any time. It checks the key,
 TypeSafe API reachability, the protected Codex Router caller secret, the router
 health, and whether `jev/auto` is actually loaded in the authenticated model
 catalog, without printing either credential. During first-time bootstrap,
@@ -101,13 +132,30 @@ does not associate an existing task with that provider.
 4. Verify a small request through **4202 → Jev 4319 → native 4202**, then through
    an ephemeral Codex invocation reading the saved configuration. Checking
    Jev's health alone does not exercise the client transport.
-5. Quit and reopen Codex on the host Mac to reload the configuration before
-   retrying the existing task from desktop or mobile.
+5. Fully quit and reopen Codex Desktop on the host OS so it reloads the
+   configuration before retrying the existing task.
 
 The built-in OpenAI transport override was verified with Codex
 `0.155.0-alpha.9.2`; no switch to a different provider or catalog was needed.
 See the [official configuration documentation](https://learn.chatgpt.com/docs/config-file/config-advanced)
 for the distinction between the built-in endpoint override and custom providers.
+
+## Shadow Eval operations
+
+The production evaluator writes
+`~/.codex/codex-router/jev-shadow-eval.jsonl` and never copies prompt text,
+tool arguments, command output, or response bodies. It records the raw Jev
+choice, the smart route, the actually served route, completion outcome, numeric
+usage/cache counters, latency, retries, and next-turn tool success/error.
+
+Windows keeps these rolling outputs current automatically:
+
+- `jev-shadow-eval-7d.txt`
+- `jev-shadow-eval-7d.json`
+
+The report's quality value is an operational proxy for the route that actually
+ran. The raw Jev route receives a counterfactual cost estimate only; it is never
+assigned invented counterfactual quality.
 
 ## Design notes
 
