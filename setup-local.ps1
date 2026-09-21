@@ -248,7 +248,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "== 5/10  Provider discovery =="
-if (-not (Wait-JevProviderDiscovery 4)) {
+$providerReady = Wait-JevProviderDiscovery 4
+if (-not $providerReady) {
+  Write-Host "Provider discovery is still unstable; reinstalling the Jev Windows task once."
+  & powershell.exe @serviceArgs
+  if ($LASTEXITCODE -eq 0) {
+    $providerReady = Wait-JevProviderDiscovery 4
+  }
+}
+if (-not $providerReady) {
   $summary = Get-JevServiceFailureSummary
   if (Test-JevCatalog) {
     throw "Jev /v1/models is healthy, but Codex Router could not reach the generic provider after retries. $summary"
