@@ -380,10 +380,10 @@ function Ensure-CodexRouterBaseInstalled([string]$Directory) {
   $forceOpenSslRepair = Test-HistoricalOpenSslCrash
   Prepare-And-VerifyCodexRouterPython $Directory $forceOpenSslRepair
 
-  # Install the upstream router with an explicit empty external-provider
-  # selection, while leaving credential discovery enabled. Jev setup below
-  # needs Codex's local ChatGPT session sharing, which is intentionally blocked
-  # by upstream when discovery is disabled.
+  # Install the upstream router in a valid idle state first: no external
+  # provider and credential discovery disabled. Upstream's doctor treats that
+  # pair as an intentional idle install. setup-local.ps1 then explicitly
+  # enables discovery before authorizing the existing Codex ChatGPT session.
   Write-Step "Installing/repairing the Codex Router base service"
   $routerInstall = Join-Path $Directory "install.ps1"
   $log = Get-CodexRouterLogPath
@@ -395,6 +395,7 @@ function Ensure-CodexRouterBaseInstalled([string]$Directory) {
     "-File", $routerInstall,
     "-Target", "codex",
     "-NoProvider",
+    "-NoDiscovery",
     "-NoTray"
   )
   & powershell.exe @routerInstallArgs
