@@ -166,6 +166,45 @@ def tool_step_key(
     return hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
 
 
+def failure_state(
+    session: Dict[str, Any],
+    *,
+    step_type: str,
+    errored: bool,
+    tool_key: Optional[str],
+) -> tuple[int, bool, Dict[str, Any]]:
+    """Advance failure evidence exactly once per logical tool result.
+
+    Returns (failure_streak, replay, persistence_fields). Transport replays
+    of the same tool output keep the existing streak and do not become fresh
+    failure evidence.
+    """
+    prior = session.get("failure_streak", 0) if isinstance(session, dict) else 0
+    prior = prior if isinstance(prior, int) and prior >= 0 else 0
+    replay = (
+        step_type == "tool_step"
+        and bool(tool_key)
+        and isinstance(session, dict)
+        and session.get("last_tool_step_key") == tool_key
+    )
+
+    if replay:
+        streak = prior
+    elif step_type == "user_turn":
+        streak = 0
+    elif step_type == "tool_step":
+        streak = min(prior + 1, 9) if errored else 0
+    else:
+        streak = prior
+
+    fields: Dict[str, Any] = {"failure_streak": streak}
+    if step_type == "tool_step" and tool_key:
+        fields["last_tool_step_key"] = tool_key
+    elif step_type == "user_turn":
+        fields["last_tool_step_key"] = None
+    return streak, replay, fields
+
+
 @dataclass(frozen=True)
 class RouteLease:
     model: str
