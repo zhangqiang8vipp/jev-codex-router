@@ -18,17 +18,22 @@ function Get-AutoToggleProcesses([string]$Directory) {
       Get-CimInstance Win32_Process -Filter "Name = 'JevCodexAutoToggle.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
           $candidate = [string]$_.ExecutablePath
-          if ([string]::IsNullOrWhiteSpace($candidate)) {
-            $candidate = [string]$_.CommandLine
+          if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            try {
+              $full = [IO.Path]::GetFullPath($candidate)
+              return $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+            } catch {}
           }
-          if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
 
-          try {
-            $full = [IO.Path]::GetFullPath($candidate.Trim('"'))
-            return $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
-          } catch {
-            return ([string]$_.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
-          }
+          # ExecutablePath can be unavailable for a process snapshot. In that
+          # case inspect only this named executable's command line and require
+          # the managed install root to appear in it.
+          $commandLine = [string]$_.CommandLine
+          if ([string]::IsNullOrWhiteSpace($commandLine)) { return $false }
+          return (
+            $commandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $commandLine.IndexOf("JevCodexAutoToggle.exe", [StringComparison]::OrdinalIgnoreCase) -ge 0
+          )
         }
     )
   } catch {
