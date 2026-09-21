@@ -9,6 +9,10 @@ internal sealed record CodexAnchor(IntPtr WindowHandle, int ProcessId, Rect Boun
 
 internal sealed class CodexUiTracker
 {
+    private static readonly TimeSpan ProcessCacheLifetime = TimeSpan.FromSeconds(2);
+    private HashSet<int> _cachedProcessIds = new();
+    private DateTimeOffset _processCacheAt = DateTimeOffset.MinValue;
+
     private static readonly string[] ChineseEffortNames =
     [
         "选择强度", "轻度", "中等", "中", "高", "极高", "最高"
@@ -96,8 +100,11 @@ internal sealed class CodexUiTracker
         catch (COMException) { return null; }
     }
 
-    private static HashSet<int> FindCodexProcessIds()
+    private HashSet<int> FindCodexProcessIds()
     {
+        if (DateTimeOffset.UtcNow - _processCacheAt < ProcessCacheLifetime)
+            return _cachedProcessIds;
+
         var ids = new HashSet<int>();
         foreach (var processName in new[] { "Codex", "ChatGPT" })
         {
@@ -124,6 +131,8 @@ internal sealed class CodexUiTracker
                 }
             }
         }
+        _cachedProcessIds = ids;
+        _processCacheAt = DateTimeOffset.UtcNow;
         return ids;
     }
 
