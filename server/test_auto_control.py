@@ -51,6 +51,17 @@ class AutoControl(unittest.TestCase):
                 self.assertEqual(control.read_redirect_model(state), previous)
                 self.assertFalse(os.path.exists(control.backup_path(state)))
 
+    def test_enable_refreshes_a_stale_restore_point(self):
+        with tempfile.TemporaryDirectory() as state:
+            with open(control.backup_path(state), "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "previous_model": "stale/model"}, fh)
+            self.write_redirect(state, "current/model")
+            with mock.patch.object(control, "resolve_control_script", return_value=__file__), \
+                 mock.patch.object(control, "_run_control", side_effect=self.fake_runner(state)):
+                control.set_enabled(state, "/router", True)
+                control.set_enabled(state, "/router", False)
+            self.assertEqual(control.read_redirect_model(state), "current/model")
+
     def test_disable_does_not_clobber_newer_operator_redirect(self):
         with tempfile.TemporaryDirectory() as state:
             with mock.patch.object(control, "resolve_control_script", return_value=__file__), \
