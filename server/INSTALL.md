@@ -6,6 +6,19 @@ the `jev/auto` model. For each turn it asks Jev for a route
 the Codex Router's local caller edge, which serves native GPT models from the
 shared ChatGPT session.
 
+## One-command local setup
+
+Prefer the repository-level installer when wiring a fresh Mac:
+
+```bash
+bash setup-local.sh /absolute/path/to/codex-router
+```
+
+It uses the current Codex Router CLI (`bin/model-router codex ...`) to register
+the loopback generic Responses provider, starts this launchd service, discovers
+the virtual model from `/v1/models`, curates `jev/auto` with the five supported
+effort levels, restarts the router, and runs the full five-part readiness check.
+
 ## Lifecycle
 
 | Action | Command |
@@ -18,8 +31,8 @@ shared ChatGPT session.
 | Service restart | `launchctl kickstart -k gui/$(id -u)/com.thibaultsaintjean.jev-router` |
 | Watchdog (no launchd) | `server/watchdog.sh`, e.g. cron every 5 min |
 | Hide the model | `./bin/control picker set jev/auto hide` (router checkout) |
-| Disable the provider | `./bin/codex-router providers generic disable jev` |
-| Revoke native sharing | `./bin/codex-router chatgpt-session disable` |
+| Disable the provider | `./bin/model-router codex providers generic disable jev` |
+| Revoke native sharing | `./bin/model-router codex chatgpt-session disable` |
 
 ## Key setup
 
@@ -37,19 +50,21 @@ To use another file, set `JEV_ENV_FILE=/path/to/env` when running
 launchd plist, never the key itself.
 
 Run `python3 server/jev_server.py --check` at any time. It checks the key,
-TypeSafe API reachability, the protected Codex Router caller secret, and the
-router on port 4202 without printing either credential.
+TypeSafe API reachability, the protected Codex Router caller secret, the router
+health, and whether `jev/auto` is actually loaded in the authenticated model
+catalog, without printing either credential. During first-time bootstrap,
+`server/install-service.sh` uses `--check-core` before the model is curated.
 
 ## After a Codex Router update
 
 Provider and model state live outside the router checkout, so updates should not
 touch them. Verify anyway:
 
-1. `./bin/codex-router providers generic list` → should show `SHOW jev`.
+1. `./bin/model-router codex providers generic list` → should show `SHOW jev`.
 2. `cat ~/.codex/codex-router/model-picker.json` → `jev/auto` under `visible`.
 3. `curl -s http://127.0.0.1:4319/health` → `{"ok": true...}`.
-4. `python3 server/jev_server.py --check` → all four checks should be `OK`.
-5. If needed: `./bin/codex-router refresh-catalog`, then restart Codex.
+4. `python3 server/jev_server.py --check` → all five checks should be `OK`, including `jev_model`.
+5. If needed: `./bin/model-router codex refresh-catalog` and `./bin/control service restart`, then fully restart Codex.
 
 ## Troubleshooting
 
@@ -58,12 +73,11 @@ touch them. Verify anyway:
   forces `Content-Type: text/event-stream` on streamed replies for exactly this
   reason; make sure you run the current `jev_server.py`.
 - **401 / route refused by the edge**: the shared ChatGPT session expired —
-  re-run `./bin/codex-router chatgpt-session enable`.
+  re-run `./bin/model-router codex chatgpt-session enable`.
 - **Every turn routes to astra**: check the decision log (`gate` field) — the
   kill switch may be on, or the TypeSafe key is unreadable (look for
   `jev_error` / `no_key_or_task` gates).
-- **Model missing from the picker**: re-run `refresh-catalog` and
-  `picker set jev/auto show`, then fully restart Codex.
+- **Model missing from the picker**: re-run `./bin/curate-models jev --models auto --efforts low,medium,high,xhigh,max --apply`, then `./bin/control service restart` and fully restart Codex.
 
 ### Model visible but rejected by ChatGPT
 
@@ -72,7 +86,7 @@ can mean the model is selected while the OpenAI provider still points directly
 at OpenAI. Listing a model in a catalog, or declaring `[model_providers.jev]`,
 does not associate an existing task with that provider.
 
-1. Inspect `./bin/codex-router status`: check `model_provider` and the redacted
+1. Inspect `./bin/model-router codex status`: check `model_provider` and the redacted
    `openai_base_url`, not just whether the service is running.
 2. Verify the main router has the enabled `jev` generic provider and the
    `jev/auto` entry in `user-models.json`. A direct Codex provider declaration
