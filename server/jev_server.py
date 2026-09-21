@@ -69,14 +69,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from auto_control import set_enabled as set_auto_enabled
 from auto_control import status as auto_status
 from route_lease import (RouteLeaseLocks, apply_failure_escalation,
-                         contains_compaction, human_turn_key, lease_fields,
-                         read_lease, route_action, served_continuity_fields,
-                         tool_step_key)
+                         contains_compaction, failure_state, human_turn_key,
+                         lease_fields, read_lease, route_action,
+                         served_continuity_fields, tool_step_key)
 from routing_policy import (ASTRA, EFFORTS, LUNA, POLICY_VERSION, QUESTIONS, SOL,
                             TERRA, TIERS, decision_from_answers, route)
 from smart_context import (RepoProfiler, SessionStore, apply_guardrails,
-                           enrich_jev_state, extract_cwd, next_failure_streak,
-                           session_key)
+                           enrich_jev_state, extract_cwd, session_key)
 from shadow_eval import (append_event as append_shadow_event,
                          build_tool_feedback, build_turn_event, new_turn_id)
 
@@ -1553,7 +1552,6 @@ class Handler(BaseHTTPRequestHandler):
         cwd = extract_cwd(payload)
         thread_key = session_key(payload, cwd, self.headers)
         session = SESSION_STORE.get(thread_key)
-        failure_streak = next_failure_streak(session, step)
         repo = REPO_PROFILER.snapshot(cwd)
         stream_requested = payload.get("stream") is True
         turn_id = new_turn_id()
@@ -1585,21 +1583,11 @@ class Handler(BaseHTTPRequestHandler):
             # Another concurrent replay may have created the lease while this
             # request waited for the per-session decision lock.
             session = SESSION_STORE.get(thread_key)
-            previous_failure_streak = session.get("failure_streak", 0)
-            previous_failure_streak = (
-                previous_failure_streak
-                if isinstance(previous_failure_streak, int) and previous_failure_streak >= 0
-                else 0
-            )
-            tool_replay = (
-                step.get("step_type") == "tool_step"
-                and bool(tool_key)
-                and session.get("last_tool_step_key") == tool_key
-            )
-            failure_streak = (
-                previous_failure_streak
-                if tool_replay
-                else next_failure_streak(session, step)
+            failure_streak, tool_replay, continuity_fields = failure_state(
+                session,
+                step_type=step.get("step_type") or "other",
+                errored=bool(step.get("errored")),
+                tool_key=tool_key,
             )
             lease = read_lease(session, POLICY_VERSION)
 
@@ -1620,11 +1608,6 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
 
-            continuity_fields = {"failure_streak": failure_streak}
-            if step.get("step_type") == "tool_step" and tool_key:
-                continuity_fields["last_tool_step_key"] = tool_key
-            elif step.get("step_type") == "user_turn":
-                continuity_fields["last_tool_step_key"] = None
             lease_action, lease_reason = route_action(
                 step_type=step.get("step_type") or "other",
                 meaningful_user_turn=meaningful_user_turn,
