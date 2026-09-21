@@ -2,7 +2,8 @@
 param(
   [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
   [string]$JevEnvFile = "",
-  [string]$StateDir = ""
+  [string]$StateDir = "",
+  [string]$RouterDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +35,9 @@ if (-not [string]::IsNullOrWhiteSpace($JevEnvFile)) {
   $env:JEV_ENV_FILE = [IO.Path]::GetFullPath($JevEnvFile)
 }
 $env:CODEX_ROUTER_STATE_DIR = $StateDir
+if (-not [string]::IsNullOrWhiteSpace($RouterDir)) {
+  $env:CODEX_ROUTER_DIR = [IO.Path]::GetFullPath($RouterDir)
+}
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
