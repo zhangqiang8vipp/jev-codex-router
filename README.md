@@ -286,8 +286,7 @@ Set-Content -Path (Join-Path $HOME ".hermes\.env") -Value "TYPESAFE_API_KEY=YOUR
 Then run the one-command setup from this repository:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
-  -RouterDir "C:\absolute\path\to\codex-router"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 -RouterDir "C:\absolute\path\to\codex-router"
 ```
 
 The Windows setup is idempotent. It verifies Codex Router and the shared ChatGPT
