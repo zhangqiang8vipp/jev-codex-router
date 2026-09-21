@@ -29,7 +29,7 @@ public partial class OverlayWindow : Window
             new IntPtr(style));
     }
 
-    public void SetAnchor(CodexAnchor anchor)
+    internal void SetAnchor(CodexAnchor anchor)
     {
         _targetWindowHandle = anchor.WindowHandle;
         var dpi = _targetWindowHandle != IntPtr.Zero
@@ -46,7 +46,7 @@ public partial class OverlayWindow : Window
         Top = Math.Max(4, anchorTop + (anchorHeight - Height) / 2.0);
     }
 
-    public void SetState(AutoSnapshot snapshot, bool busy)
+    internal void SetState(AutoSnapshot snapshot, bool busy)
     {
         AutoButton.IsEnabled = !busy && snapshot.Available;
         AutoButton.Opacity = busy ? 0.68 : 1.0;
