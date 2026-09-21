@@ -15,5 +15,7 @@ jobs:
           python-version: "3.12"
       - name: Byte-compile all Python sources
         run: python -m compileall -q server poc
+      - name: Shell syntax
+        run: bash -n setup-local.sh server/install-service.sh server/watchdog.sh
       - name: Unit tests
         run: python -m unittest discover -s server -p "test_*.py" -v
