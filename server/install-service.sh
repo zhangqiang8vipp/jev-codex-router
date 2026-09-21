@@ -37,6 +37,22 @@ if [ ! -r "$KEY_FILE" ]; then
 fi
 chmod 600 "$KEY_FILE" 2>/dev/null || true
 
+STATE_DIR="${CODEX_ROUTER_STATE_DIR:-$HOME/.codex/codex-router}"
+export CODEX_ROUTER_STATE_DIR="$STATE_DIR"
+EXACT_NATIVE_ROUTE=""
+PATCHER="$REPO/server/patch_codex_router.py"
+if [ -n "${CODEX_ROUTER_DIR:-}" ] && [ -f "$PATCHER" ]; then
+  if "$PYTHON" "$PATCHER" \
+    --router-dir "$CODEX_ROUTER_DIR" \
+    --state-dir "$STATE_DIR" \
+    --restart; then
+    EXACT_NATIVE_ROUTE="1"
+  else
+    echo "WARNING: scoped exact native routing is unavailable; using legacy redirect suppression." >&2
+  fi
+fi
+export JEV_EXACT_NATIVE_ROUTE="$EXACT_NATIVE_ROUTE"
+
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
