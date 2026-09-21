@@ -1451,7 +1451,7 @@ CHECK_QUESTIONS = {
 }
 
 
-def installation_check():
+def installation_check(require_model=True):
     """Return bounded readiness checks without ever exposing credentials."""
     checks = []
 
@@ -1488,6 +1488,7 @@ def installation_check():
     else:
         checks.append({"name": "typesafe_api", "ok": False, "detail": "skipped: key missing"})
 
+    secret = ""
     try:
         secret = caller_secret()
         checks.append({
@@ -1523,44 +1524,45 @@ def installation_check():
     finally:
         conn.close()
 
-    if router_ok and secret:
-        conn = http.client.HTTPConnection(*ROUTER, timeout=3)
-        try:
-            conn.request(
-                "GET",
-                f"/_codex-router/{secret}/v1/models",
-                headers={"Accept": "application/json"},
-            )
-            resp = conn.getresponse()
-            raw = resp.read(512 * 1024)
-            catalog = json.loads(raw.decode("utf-8")) if resp.status == 200 else {}
-            rows = catalog.get("data") if isinstance(catalog, dict) else None
-            ids = {
-                row.get("id")
-                for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
-            } if isinstance(rows, list) else set()
-            loaded = VIRTUAL_MODEL_SLUG in ids
-            checks.append({
-                "name": "jev_model",
-                "ok": loaded,
-                "detail": "jev/auto loaded"
-                          if loaded
-                          else "jev/auto missing; run setup-local.sh or curate-models, then restart Codex Router",
-            })
-        except Exception as exc:
+    if require_model:
+        if router_ok and secret:
+            conn = http.client.HTTPConnection(*ROUTER, timeout=3)
+            try:
+                conn.request(
+                    "GET",
+                    f"/_codex-router/{secret}/v1/models",
+                    headers={"Accept": "application/json"},
+                )
+                resp = conn.getresponse()
+                raw = resp.read(512 * 1024)
+                catalog = json.loads(raw.decode("utf-8")) if resp.status == 200 else {}
+                rows = catalog.get("data") if isinstance(catalog, dict) else None
+                ids = {
+                    row.get("id")
+                    for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+                } if isinstance(rows, list) else set()
+                loaded = VIRTUAL_MODEL_SLUG in ids
+                checks.append({
+                    "name": "jev_model",
+                    "ok": loaded,
+                    "detail": "jev/auto loaded"
+                              if loaded
+                              else "jev/auto missing; run setup-local.sh or curate-models, then restart Codex Router",
+                })
+            except Exception as exc:
+                checks.append({
+                    "name": "jev_model",
+                    "ok": False,
+                    "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+                })
+            finally:
+                conn.close()
+        else:
             checks.append({
                 "name": "jev_model",
                 "ok": False,
-                "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+                "detail": "skipped: Codex Router or caller secret not ready",
             })
-        finally:
-            conn.close()
-    else:
-        checks.append({
-            "name": "jev_model",
-            "ok": False,
-            "detail": "skipped: Codex Router or caller secret not ready",
-        })
 
     return {
         "ok": all(item["ok"] for item in checks),
@@ -1582,9 +1584,11 @@ def print_installation_check(result):
 def main(argv=None):
     argv = list(argv if argv is not None else __import__("sys").argv[1:])
     if argv == ["--check"]:
-        return print_installation_check(installation_check())
+        return print_installation_check(installation_check(require_model=True))
+    if argv == ["--check-core"]:
+        return print_installation_check(installation_check(require_model=False))
     if argv:
-        print("usage: python3 server/jev_server.py [--check]", flush=True)
+        print("usage: python3 server/jev_server.py [--check|--check-core]", flush=True)
         return 2
 
     server = ThreadingHTTPServer(LISTEN, Handler)
