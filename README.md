@@ -191,100 +191,99 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 
 ## Quickstart
 
-Prerequisites: macOS, a Codex desktop install wired to a **Codex Router**
-(checkout with `bin/codex-router`), Python 3.11+, and a TypeSafe API key (Jev).
+Prerequisites: macOS, Codex Desktop/CLI signed in with ChatGPT, Python 3.11+,
+a current [Codex Router](https://github.com/duolahypercho/codex-router) checkout,
+and a TypeSafe API key for Jev.
 
-**1. Give the server your TypeSafe key.** For persistent macOS use, store it in
-an owner-readable file (launchd does not inherit your interactive shell):
+### Recommended: one-command setup
+
+**1. Store the Jev key** in an owner-readable file:
 
 ```bash
 mkdir -p ~/.hermes
-printf '%s\n' 'TYPESAFE_API_KEY=your-key' > ~/.hermes/.env
+printf '%s\n' 'TYPESAFE_API_KEY=YOUR_KEY' > ~/.hermes/.env
 chmod 600 ~/.hermes/.env
-# optional: JEV_ENV_FILE=/path/to/env bash server/install-service.sh
 ```
 
-A foreground run may also use `TYPESAFE_API_KEY` from the process environment.
-
-**2. Start the server** (foreground test):
+**2. Run the local setup** from this repository:
 
 ```bash
-python3 server/jev_server.py
-curl -s http://127.0.0.1:4319/health
-# in another terminal, after Codex Router is running:
-python3 server/jev_server.py --check
+bash setup-local.sh /absolute/path/to/codex-router
 ```
 
-**3. Register with the Codex Router:**
+The script is idempotent. It:
+
+1. verifies the Codex Router service is installed;
+2. verifies/authorizes the current Codex ChatGPT session for the local router;
+3. creates or updates the loopback `jev` generic provider using
+   `openai-responses` + `--allow-private`;
+4. installs the Jev server as a per-user launchd service;
+5. verifies `http://127.0.0.1:4319/v1/models`;
+6. curates `jev/auto` with `low,medium,high,xhigh,max`;
+7. restarts Codex Router so the new route is loaded;
+8. runs a full readiness check, including verifying that `jev/auto` is in
+   the authenticated router catalog.
+
+Then **fully quit and reopen Codex Desktop** and select **Jev Codex Router**.
+
+If your key lives elsewhere:
 
 ```bash
-cd <codex-router checkout>
-
-# share the native ChatGPT session with local clients (revisit if it expires)
-./bin/codex-router chatgpt-session enable
-
-# declare the generic provider (our local server, native Responses format)
-./bin/codex-router providers generic add jev \
-  --name "Jev Router" --base-url http://127.0.0.1:4319/v1 \
-  --adapter openai-responses --allow-private
-
-# declare the model: ~/.codex/codex-router/user-models.json
-# (this file is local state — router updates won't touch it)
+JEV_ENV_FILE=/secure/path/jev.env \
+  bash setup-local.sh /absolute/path/to/codex-router
 ```
 
-```json
-{
-  "version": 1,
-  "models": [
-    {
-      "slug": "jev/auto",
-      "gatewayModel": "jev-auto",
-      "compHash": "jev-auto-user-v1",
-      "upstreamModel": "auto",
-      "provider": "jev",
-      "listed": true,
-      "displayName": "Jev Codex Router",
-      "description": "Auto-routing by Jev: every call is served by luna, terra, sol or astra at the reasoning depth it needs.",
-      "priority": 95,
-      "defaultEffort": "medium",
-      "reasoningLevels": [
-        { "effort": "low", "description": "Quick reasoning" },
-        { "effort": "medium", "description": "Balanced reasoning" },
-        { "effort": "high", "description": "Deep reasoning" },
-        { "effort": "xhigh", "description": "Extended reasoning" },
-        { "effort": "max", "description": "Maximum reasoning" }
-      ],
-      "contextWindow": 258400,
-      "autoCompact": 219640,
-      "inputModalities": ["text", "image"]
-    }
-  ]
-}
-```
+### Manual equivalent
+
+From the Codex Router checkout:
 
 ```bash
-# publish the catalog and make the model visible in the picker
-./bin/codex-router refresh-catalog
-./bin/control picker set jev/auto show
+codex login status
+./bin/model-router codex chatgpt-session enable
+
+./bin/model-router codex providers generic add jev \
+  --name "Jev Router" \
+  --base-url http://127.0.0.1:4319/v1 \
+  --adapter openai-responses \
+  --allow-private
 ```
 
-**4. Quit and reopen Codex**, then pick **“Jev Codex Router”** in the model picker.
-Check the transport as well as the picker: `jev/auto` must reach the local
-router, not OpenAI's native endpoint. A catalog entry or a
-`[model_providers.jev]` declaration alone does not select that transport.
-See [transport troubleshooting](server/INSTALL.md#model-visible-but-rejected-by-chatgpt)
-if Codex reports that `jev/auto` is unsupported with a ChatGPT account.
+If `jev` already exists, use `providers generic edit jev` with the same
+options instead of `add`.
 
-**5. Make it permanent** (optional but recommended): run the service installer
-in your own Terminal (launchd management is intentionally restricted inside
-supervised agents):
+Back in this repository, install/start Jev:
 
 ```bash
 bash server/install-service.sh
 ```
 
-Without it, `server/watchdog.sh` (cron every 5 min) restarts the server if it
-stops answering.
+Then curate the virtual model from Jev's live `/models` metadata:
+
+```bash
+cd /absolute/path/to/codex-router
+./bin/model-router codex providers generic test jev
+./bin/curate-models jev \
+  --models auto \
+  --efforts low,medium,high,xhigh,max \
+  --apply
+./bin/control service restart
+```
+
+Finally:
+
+```bash
+cd /absolute/path/to/jev-codex-router
+python3 server/jev_server.py --check
+```
+
+A successful full check reports **five OK checks**: TypeSafe key, TypeSafe API,
+caller secret, Codex Router, and the loaded `jev/auto` route. No key or caller
+capability is printed.
+
+The virtual model advertises a 1,050,000-token context window, text+image input,
+tool support, and reasoning support. That lets current Codex Router curation
+generate the local picker entry instead of requiring direct edits to
+`user-models.json`.
 
 ## Operations
 
