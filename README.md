@@ -159,6 +159,47 @@ Their logged Fast speed retains its surcharge instead of being repriced by the
 new policy. The old backtest is clearly labelled as a simulation. Current replay
 scripts share the live decision contract and reject a cache from another policy.
 
+## Shadow Eval (production)
+
+Every real Codex call now produces a second, privacy-reduced evaluation event in
+`~/.codex/codex-router/jev-shadow-eval.jsonl`. The request is still executed
+**once**. Shadow Eval records three distinct routes:
+
+- **Jev route** — the raw typed Choice result before local guardrails;
+- **smart route** — the production route after continuity/recovery guardrails;
+- **served route** — the model that actually answered after quota fallback/retry.
+
+It also records the Responses outcome, per-attempt token usage, cached-input
+tokens, cache-write counters when reported, end-to-end/Jev latency, retry count,
+and the next tool-result success/error when one arrives. Prompt text, tool
+arguments, command output and response bodies are not copied into the Shadow
+Eval log.
+
+Generate the rolling report manually:
+
+```powershell
+py -3 server\report_shadow_eval.py --days 7 --write
+```
+
+or on macOS/Linux:
+
+```bash
+python3 server/report_shadow_eval.py --days 7 --write
+```
+
+The report writes `jev-shadow-eval-7d.txt` and `jev-shadow-eval-7d.json` in
+the router state directory. Windows installation registers a daily 03:15
+Scheduled Task with `StartWhenAvailable`, so after the first week the rolling
+7-day report is maintained automatically.
+
+The Pareto frontier is intentionally **observational**. Quality is an
+operational proxy from the route that really ran (Responses completion plus
+observed tool-result errors). The raw Jev route is used only for a
+same-token-volume cost counterfactual; the report never invents quality for a
+model/effort pair that was not executed. Pair comparisons are selection-biased
+because different tasks are routed to different pairs, so use the frontier to
+find candidates for calibration, not as causal proof.
+
 ## Ask surface (`POST /ask`)
 
 The server also answers typed questions directly, for local callers that bring
@@ -191,124 +232,94 @@ hook/        Explored alternative (LiteLLM callback tap) — kept for reference
 
 ## Quickstart
 
-Prerequisites: macOS, Codex Desktop/CLI signed in with ChatGPT, Python 3.11+,
-a current [Codex Router](https://github.com/duolahypercho/codex-router) checkout,
-and a TypeSafe API key for Jev.
+### Windows (recommended for this fork)
 
-### Recommended: one-command setup
+Prerequisites: Windows 10/11, Codex Desktop or CLI signed in with ChatGPT,
+PowerShell in FullLanguage mode, Python 3.11+, Node.js, a current
+[Codex Router](https://github.com/duolahypercho/codex-router) checkout, and a
+TypeSafe API key for Jev.
 
-**1. Store the Jev key** in an owner-readable file:
+Store the key locally; do not put it in command arguments:
 
-```bash
-mkdir -p ~/.hermes
-printf '%s\n' 'TYPESAFE_API_KEY=YOUR_KEY' > ~/.hermes/.env
-chmod 600 ~/.hermes/.env
+```powershell
+New-Item -ItemType Directory -Force (Join-Path $HOME ".hermes") | Out-Null
+Set-Content -Path (Join-Path $HOME ".hermes\.env") -Value "TYPESAFE_API_KEY=YOUR_KEY"
 ```
 
-**2. Run the local setup** from this repository:
+Then run the one-command setup from this repository:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 \
+  -RouterDir "C:\absolute\path\to\codex-router"
+```
+
+The Windows setup is idempotent. It verifies Codex Router and the shared ChatGPT
+session, creates/updates the loopback `jev` generic Responses provider,
+installs Jev as a hidden per-user Scheduled Task, registers a one-minute
+heartbeat supervisor, registers the daily rolling Shadow Eval task, discovers
+`auto`, curates `jev/auto` with all five effort levels, applies/restarts the
+router overlay, and runs the full five-part readiness check.
+
+A successful install ends with `READY`. Fully quit and reopen Codex Desktop,
+then choose **Jev Codex Router**.
+
+Useful Windows checks:
+
+```powershell
+py -3 server\jev_server.py --check
+Get-ScheduledTask -TaskName "Jev Codex Router"
+Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"
+Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"
+```
+
+To remove only this project's background tasks:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\server\uninstall-service.ps1
+```
+
+### macOS
+
+The existing macOS flow remains available:
 
 ```bash
 bash setup-local.sh /absolute/path/to/codex-router
 ```
 
-The script is idempotent. It:
-
-1. verifies the Codex Router service is installed;
-2. verifies/authorizes the current Codex ChatGPT session for the local router;
-3. creates or updates the loopback `jev` generic provider using
-   `openai-responses` + `--allow-private`;
-4. installs the Jev server as a per-user launchd service;
-5. verifies `http://127.0.0.1:4319/v1/models`;
-6. curates `jev/auto` with `low,medium,high,xhigh,max`;
-7. restarts Codex Router so the new route is loaded;
-8. runs a full readiness check, including verifying that `jev/auto` is in
-   the authenticated router catalog.
-
-Then **fully quit and reopen Codex Desktop** and select **Jev Codex Router**.
-
-If your key lives elsewhere:
-
-```bash
-JEV_ENV_FILE=/secure/path/jev.env \
-  bash setup-local.sh /absolute/path/to/codex-router
-```
-
-### Manual equivalent
-
-From the Codex Router checkout:
-
-```bash
-codex login status
-./bin/model-router codex chatgpt-session enable
-
-./bin/model-router codex providers generic add jev \
-  --name "Jev Router" \
-  --base-url http://127.0.0.1:4319/v1 \
-  --adapter openai-responses \
-  --allow-private
-```
-
-If `jev` already exists, use `providers generic edit jev` with the same
-options instead of `add`.
-
-Back in this repository, install/start Jev:
-
-```bash
-bash server/install-service.sh
-```
-
-Then curate the virtual model from Jev's live `/models` metadata:
-
-```bash
-cd /absolute/path/to/codex-router
-./bin/model-router codex providers generic test jev
-./bin/curate-models jev \
-  --models auto \
-  --efforts low,medium,high,xhigh,max \
-  --apply
-./bin/control service restart
-```
-
-Finally:
-
-```bash
-cd /absolute/path/to/jev-codex-router
-python3 server/jev_server.py --check
-```
-
-A successful full check reports **five OK checks**: TypeSafe key, TypeSafe API,
-caller secret, Codex Router, and the loaded `jev/auto` route. No key or caller
-capability is printed.
-
-The virtual model advertises a 1,050,000-token context window, text+image input,
-tool support, and reasoning support. That lets current Codex Router curation
-generate the local picker entry instead of requiring direct edits to
-`user-models.json`.
+Both platforms use the same `jev_server.py`, routing policy, Shadow Eval log,
+and report format.
 
 ## Operations
 
+### Windows
+
 | Action | Command |
 |---|---|
-| Watch decisions | `tail -f ~/.codex/codex-router/jev-router-live.jsonl` |
-| See the picked model in the thread | every reasoning summary part carries the routed tag, separators on both sides: ` · 🧠sol:low · ` — one glyph per route: ⚡ luna (economical) · 🧠 sol (workhorse) · 🚀 astra (frontier) · 🌍 terra; 🐳 deepseek / ✨ glm while the Codex-dry tandem is serving |
-| Show the model and thinking above every assistant message | `touch ~/.codex/codex-router/jev-router.signature` — a leading `**🧠 sol · thinking: high**` appears from the first text fragment, including commentary and unphased replies; remove the file to disable |
-| Shadow mode (decide + log, serve astra) | `touch ~/.codex/codex-router/jev-router.shadow` |
-| Debug capture (shapes + raw streams) | `touch ~/.codex/codex-router/jev-router.debug` |
-| Kill switch (no Jev → frontier) | `touch ~/.codex/codex-router/jev-router.off` (delete the file to re-enable) |
-| Force the Codex-dry tandem | `touch ~/.codex/codex-router/jev-router.codex-dry` (delete the file to return to luna/terra/sol/astra) |
-| Inspect the dry auto state | `cat ~/.codex/codex-router/jev-router.codex-dry.json` (reason + expiry; auto-cleared by the next successful native call) |
-| Hide the model | `./bin/control picker set jev/auto hide` |
-| Disable the provider | `./bin/codex-router providers generic disable jev` |
-| Revoke native sharing | `./bin/codex-router chatgpt-session disable` |
-| Service status | `launchctl print gui/$(id -u)/com.thibaultsaintjean.jev-router` |
+| Full readiness | `py -3 server\jev_server.py --check` |
+| Watch live routing log | `Get-Content "$HOME\.codex\codex-router\jev-router-live.jsonl" -Wait` |
+| Watch Shadow Eval log | `Get-Content "$HOME\.codex\codex-router\jev-shadow-eval.jsonl" -Wait` |
+| Generate rolling 7-day eval now | `py -3 server\report_shadow_eval.py --days 7 --write` |
+| Read latest 7-day report | `Get-Content "$HOME\.codex\codex-router\jev-shadow-eval-7d.txt"` |
+| Service task status | `Get-ScheduledTask -TaskName "Jev Codex Router"` |
+| Eval task status | `Get-ScheduledTask -TaskName "Jev Codex Router Shadow Eval"` |
+| Restart Jev task | `Stop-ScheduledTask -TaskName "Jev Codex Router"; Start-ScheduledTask -TaskName "Jev Codex Router"` |
+| Uninstall Jev tasks | `.\server\uninstall-service.ps1` |
 
-**After a Codex Router update**, verify nothing was lost:
+The existing sentinel files are platform-independent and live under the router
+state directory. On Windows, for example:
 
-```bash
-./bin/codex-router providers generic list        # shows: SHOW jev
-cat ~/.codex/codex-router/model-picker.json      # jev/auto in "visible"
-curl -s http://127.0.0.1:4319/health
+```powershell
+$state = Join-Path $HOME ".codex\codex-router"
+New-Item (Join-Path $state "jev-router.signature") -ItemType File -Force | Out-Null
+New-Item (Join-Path $state "jev-router.off") -ItemType File -Force | Out-Null
+Remove-Item (Join-Path $state "jev-router.off") -ErrorAction SilentlyContinue
 ```
+
+### macOS/Linux
+
+The existing `tail -f`, `touch`, launchd/watchdog and
+`bin/model-router codex ...` operations remain supported. The data and report
+files are the same names under `~/.codex/codex-router/`.
 
 ## Notes & quirks
 
@@ -331,8 +342,10 @@ curl -s http://127.0.0.1:4319/health
 
 ## Status
 
-Early, but running in production on the author's setup. The joint routing policy needs outcome calibration on real usage; the local
-decision and attempt logs provide observations, not quality labels.
+The router now includes production Shadow Eval for outcome/cost calibration and
+first-class Windows background installation. The 7-day Pareto report is
+observational: it measures the route that actually ran and does not claim
+counterfactual model quality.
 
 ## Fork and customize / 允许自己改
 
