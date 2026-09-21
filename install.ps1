@@ -15,7 +15,7 @@ $ProgressPreference = "SilentlyContinue"
 $RepoOwner = "zhangqiang8vipp"
 $RepoName = "jev-codex-router"
 $ArchiveUrl = "https://github.com/$RepoOwner/$RepoName/archive/refs/heads/$Branch.zip"
-$CodexRouterInstallUrl = "https://raw.githubusercontent.com/duolahypercho/codex-router/main/install.ps1"
+$CodexRouterRepositoryUrl = "https://github.com/duolahypercho/codex-router.git"
 
 if ($env:OS -ne "Windows_NT") {
   throw "This bootstrap installer is for Windows PowerShell. On macOS/Linux use setup-local.sh."
@@ -53,6 +53,72 @@ function Test-DotNet8 {
     return [bool]($sdks | Where-Object { $_ -match '^8\.' })
   } catch {
     return $false
+  }
+}
+
+function Resolve-SystemPython {
+  $candidates = New-Object System.Collections.Generic.List[string]
+
+  if (Get-Command py.exe -ErrorAction SilentlyContinue) {
+    foreach ($selector in @("-3.12", "-3")) {
+      try {
+        $candidate = (& py.exe $selector -c "import sys; print(sys.executable)" 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($candidate)) {
+          [void]$candidates.Add($candidate.Trim())
+        }
+      } catch {}
+    }
+  }
+
+  $python = Get-Command python.exe -ErrorAction SilentlyContinue
+  if ($python) { [void]$candidates.Add($python.Source) }
+
+  foreach ($candidate in $candidates | Select-Object -Unique) {
+    try {
+      & $candidate -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+      if ($LASTEXITCODE -eq 0) {
+        return [IO.Path]::GetFullPath($candidate)
+      }
+    } catch {}
+  }
+
+  throw "A system CPython 3.10+ runtime was not found."
+}
+
+function Test-PythonOpenSsl([string]$Python) {
+  if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) { return $false }
+  try {
+    & $Python -I -c "import ssl; ssl.create_default_context(); print(ssl.OPENSSL_VERSION)" 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
+function Prepare-CodexRouterVenv([string]$Directory) {
+  $venv = Join-Path $Directory ".venv"
+  $venvPython = Join-Path $venv "Scripts\python.exe"
+
+  if ((Test-Path -LiteralPath $venvPython -PathType Leaf) -and (Test-PythonOpenSsl $venvPython)) {
+    return
+  }
+
+  $systemPython = Resolve-SystemPython
+  if (-not (Test-PythonOpenSsl $systemPython)) {
+    throw @"
+The system Python runtime also failed its OpenSSL self-test.
+Check for SSLKEYLOGFILE or conflicting OpenSSL DLLs on PATH before retrying.
+"@
+  }
+
+  Write-Step "Creating Codex Router venv with system Python (avoids uv-managed OpenSSL conflicts)"
+  if (Test-Path -LiteralPath $venv) {
+    Remove-Item -LiteralPath $venv -Recurse -Force
+  }
+
+  & $systemPython -m venv $venv
+  if ($LASTEXITCODE -ne 0 -or -not (Test-PythonOpenSsl $venvPython)) {
+    throw "System Python could not create a working Codex Router virtual environment."
   }
 }
 
@@ -101,40 +167,47 @@ function Install-CodexRouterCheckout {
     Join-Path $HOME "AppData\Local"
   }
   $target = Join-Path $localAppData "codex-router"
-  $temp = Join-Path ([IO.Path]::GetTempPath()) ("codex-router-install-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 
-  try {
-    Write-Step "Codex Router not found; installing the base router automatically"
-    Invoke-WebRequest -Uri $CodexRouterInstallUrl -OutFile $temp
-
-    # Install the upstream router in credential-free idle mode. Jev setup below
-    # adds the only provider we need and enables the shared ChatGPT session.
-    $routerInstallArgs = @(
-      "-NoProfile",
-      "-ExecutionPolicy", "Bypass",
-      "-File", $temp,
-      "-Target", "codex",
-      "-NoProvider",
-      "-NoDiscovery",
-      "-NoTray",
-      "-InstallDir", $target
-    )
-    & powershell.exe @routerInstallArgs
-
+  if (-not (Test-Path -LiteralPath $target)) {
+    Write-Step "Codex Router not found; cloning the base router automatically"
+    & git clone --depth 1 $CodexRouterRepositoryUrl $target
     if ($LASTEXITCODE -ne 0) {
-      throw "Codex Router installer exited with status $LASTEXITCODE."
-    }
-
-    if (-not (Test-RouterCheckout $target)) {
-      throw "Codex Router installer completed but the managed checkout was not found at $target."
-    }
-
-    return [IO.Path]::GetFullPath($target)
-  } finally {
-    if (Test-Path -LiteralPath $temp) {
-      Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+      throw "Unable to clone Codex Router."
     }
   }
+
+  if (-not (Test-RouterCheckout $target)) {
+    throw "$target exists but is not a valid Codex Router checkout."
+  }
+
+  Prepare-CodexRouterVenv $target
+
+  # Install the upstream router in credential-free idle mode. The pre-created
+  # venv pins it to system CPython; if uv is installed, upstream may still use
+  # uv pip to install locked wheels into that venv, but it no longer chooses
+  # the Python runtime.
+  $routerInstall = Join-Path $target "install.ps1"
+  $routerInstallArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", $routerInstall,
+    "-Target", "codex",
+    "-NoProvider",
+    "-NoDiscovery",
+    "-NoTray"
+  )
+  & powershell.exe @routerInstallArgs
+
+  if ($LASTEXITCODE -ne 0) {
+    $log = Join-Path $HOME ".codex\codex-router\router.log"
+    if ((Test-Path -LiteralPath $log -PathType Leaf) -and
+        (Select-String -LiteralPath $log -Pattern "no OPENSSL_Applink" -Quiet)) {
+      throw "Codex Router LiteLLM still hit the Windows OPENSSL_Applink failure after the system-Python repair."
+    }
+    throw "Codex Router installer exited with status $LASTEXITCODE."
+  }
+
+  return [IO.Path]::GetFullPath($target)
 }
 
 function Resolve-RouterCheckout([string]$Explicit) {
@@ -166,7 +239,9 @@ function Resolve-RouterCheckout([string]$Explicit) {
     (Join-Path $HOME "codex-router")
   )) {
     if (Test-RouterCheckout $candidate) {
-      return [IO.Path]::GetFullPath($candidate)
+      $resolved = [IO.Path]::GetFullPath($candidate)
+      Prepare-CodexRouterVenv $resolved
+      return $resolved
     }
   }
 
