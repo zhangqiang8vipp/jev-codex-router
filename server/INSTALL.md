@@ -10,6 +10,27 @@ shared ChatGPT session.
 
 ### Windows
 
+Recommended bootstrap (install or update):
+
+```powershell
+irm https://raw.githubusercontent.com/zhangqiang8vipp/jev-codex-router/main/install.ps1 | iex
+```
+
+It downloads the latest source to
+`%LOCALAPPDATA%\JevCodexRouter\source`, auto-detects the Codex Router
+checkout, prompts locally for a missing TypeSafe/Jev key with hidden input, and
+can install missing Node.js, Python 3 or .NET 8 SDK through `winget` after
+confirmation. Re-run the same command to update.
+
+If Codex Router is not in a standard checkout path:
+
+```powershell
+$env:CODEX_ROUTER_DIR = "C:\absolute\path\to\codex-router"
+irm https://raw.githubusercontent.com/zhangqiang8vipp/jev-codex-router/main/install.ps1 | iex
+```
+
+For a checked-out development tree, the lower-level installer remains:
+
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-local.ps1 -RouterDir "C:\absolute\path\to\codex-router"
 ```
