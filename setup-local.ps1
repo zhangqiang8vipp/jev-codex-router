@@ -60,6 +60,7 @@ $RouterDir = Resolve-RouterDir $RouterDir
 $script:ModelRouter = Join-Path $RouterDir "model-router.ps1"
 $curate = Join-Path $RouterDir "src\curate-models.mjs"
 $installService = Join-Path $RepoRoot "server\install-service.ps1"
+$installToggle = Join-Path $RepoRoot "server\install-toggle.ps1"
 $server = Join-Path $RepoRoot "server\jev_server.py"
 $report = Join-Path $RepoRoot "server\report_shadow_eval.py"
 
@@ -85,13 +86,13 @@ if ([string]::IsNullOrWhiteSpace($StateDir)) {
 }
 $StateDir = [IO.Path]::GetFullPath($StateDir)
 
-Write-Host "== 1/8  Codex Router =="
+Write-Host "== 1/10  Codex Router =="
 if (-not (Test-ModelRouter @("codex", "status"))) {
   throw "Codex Router is not installed/running from $RouterDir. Install it with .\install.ps1 -Target codex -Guided -WithTray, then rerun this script."
 }
 Invoke-ModelRouter @("codex", "doctor")
 
-Write-Host "== 2/8  Codex ChatGPT session =="
+Write-Host "== 2/10  Codex ChatGPT session =="
 $codex = Get-Command codex.exe -ErrorAction SilentlyContinue
 if ($codex) {
   & $codex.Source login status
@@ -101,7 +102,7 @@ if ($codex) {
 }
 Invoke-ModelRouter @("codex", "chatgpt-session", "enable")
 
-Write-Host "== 3/8  Jev generic provider =="
+Write-Host "== 3/10  Jev generic provider =="
 if (Test-ModelRouter @("codex", "providers", "generic", "show", "jev", "--json")) {
   Invoke-ModelRouter @(
     "codex", "providers", "generic", "edit", "jev",
@@ -120,38 +121,55 @@ if (Test-ModelRouter @("codex", "providers", "generic", "show", "jev", "--json")
   )
 }
 
-Write-Host "== 4/8  Windows background service + daily eval =="
+Write-Host "== 4/10  Windows background service + daily eval =="
 $serviceArgs = @(
   "-NoProfile", "-ExecutionPolicy", "Bypass",
   "-File", $installService,
   "-RepoRoot", $RepoRoot,
   "-JevEnvFile", $JevEnvFile,
-  "-StateDir", $StateDir
+  "-StateDir", $StateDir,
+  "-RouterDir", $RouterDir
 )
 & powershell.exe @serviceArgs
 if ($LASTEXITCODE -ne 0) {
   throw "Windows Jev service installation failed."
 }
 
-Write-Host "== 5/8  Provider discovery =="
+Write-Host "== 5/10  Provider discovery =="
 Invoke-ModelRouter @("codex", "providers", "generic", "test", "jev")
 
-Write-Host "== 6/8  Curate jev/auto =="
+Write-Host "== 6/10  Curate jev/auto =="
 & node.exe $curate jev --models auto --efforts low,medium,high,xhigh,max --apply
 if ($LASTEXITCODE -ne 0) {
   throw "Curating jev/auto failed."
 }
 
-Write-Host "== 7/8  Full readiness =="
+Write-Host "== 7/10  Keep native Codex picker while routing through Codex Router =="
+Invoke-ModelRouter @("codex", "signed-routing", "on")
+
+Write-Host "== 8/10  Install native-looking Auto toggle =="
+$toggleArgs = @(
+  "-NoProfile", "-ExecutionPolicy", "Bypass",
+  "-File", $installToggle,
+  "-RepoRoot", $RepoRoot,
+  "-StateDir", $StateDir
+)
+& powershell.exe @toggleArgs
+if ($LASTEXITCODE -ne 0) {
+  throw "Auto toggle installation failed."
+}
+
+Write-Host "== 9/10  Full readiness =="
 $env:JEV_ENV_FILE = $JevEnvFile
 $env:CODEX_ROUTER_STATE_DIR = $StateDir
+$env:CODEX_ROUTER_DIR = $RouterDir
 $checkArgs = @($python.Prefix) + @($server, "--check")
 & $python.Path @checkArgs
 if ($LASTEXITCODE -ne 0) {
   throw "Full Jev readiness check failed."
 }
 
-Write-Host "== 8/8  Seed rolling Shadow Eval report =="
+Write-Host "== 10/10  Seed rolling Shadow Eval report =="
 $shadowLog = Join-Path $StateDir "jev-shadow-eval.jsonl"
 if (Test-Path -LiteralPath $shadowLog -PathType Leaf) {
   $reportArgs = @($python.Prefix) + @(
@@ -165,8 +183,10 @@ if (Test-Path -LiteralPath $shadowLog -PathType Leaf) {
 }
 
 Write-Host ""
-Write-Host "READY: Jev Codex Router is installed for Windows."
-Write-Host "Fully quit and reopen Codex Desktop, then choose: Jev Codex Router (jev/auto)"
+Write-Host "READY: Jev Codex Router + Auto toggle are installed for Windows."
+Write-Host "Fully quit and reopen Codex Desktop once."
+Write-Host "Keep using Codex native model + reasoning controls; the small Auto button beside them switches Jev routing on/off."
+Write-Host "Auto OFF = native Codex selection. Auto ON = native requests redirect to jev/auto dynamically."
 Write-Host ""
 Write-Host "Shadow Eval:"
 Write-Host "  raw log:   $StateDir\jev-shadow-eval.jsonl"
