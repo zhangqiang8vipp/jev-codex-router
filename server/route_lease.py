@@ -57,17 +57,15 @@ def _item_anchor(item: Dict[str, Any]) -> str:
     if text:
         digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
         return f"{role or kind or 'item'}:{digest}"
-    if kind:
-        # Hashing the local JSON shape is privacy-preserving because only the
-        # digest is returned/persisted.  This is useful for opaque compaction
-        # items that have no ordinary text or stable id.
-        try:
-            encoded = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        except (TypeError, ValueError):
-            encoded = str(kind)
-        digest = hashlib.sha256(encoded.encode("utf-8", "replace")).hexdigest()
-        return f"{kind}:{digest}"
-    return ""
+    # Hashing the local JSON shape is privacy-preserving because only the
+    # digest is returned/persisted. This also covers image-only user items and
+    # opaque compaction items that have no ordinary text or stable id.
+    try:
+        encoded = json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        encoded = str(kind or role or "item")
+    digest = hashlib.sha256(encoded.encode("utf-8", "replace")).hexdigest()
+    return f"{kind or role or 'item'}:{digest}"
 
 
 def human_turn_key(
