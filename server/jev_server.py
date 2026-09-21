@@ -1557,6 +1557,7 @@ class Handler(BaseHTTPRequestHandler):
         turn_id = new_turn_id()
         session_tag = thread_key[:16] if thread_key else None
         turn_key = human_turn_key(payload, task=task, session_key=thread_key)
+        active_turn_key = turn_key
         tool_key = tool_step_key(payload, digest=step.get("digest") or "", session_key=thread_key)
         compacted = contains_compaction(payload)
         meaningful_user_turn = (
@@ -1622,6 +1623,7 @@ class Handler(BaseHTTPRequestHandler):
                 if thread_key:
                     SESSION_STORE.put(thread_key, failure_streak=failure_streak)
             elif lease_action == "KEEP" and lease is not None:
+                active_turn_key = lease.turn_key or turn_key
                 model, effort, speed = lease.model, lease.effort, "default"
                 model, effort, local_escalation = apply_failure_escalation(
                     model, effort, failure_streak
@@ -1641,7 +1643,7 @@ class Handler(BaseHTTPRequestHandler):
                         **lease_fields(
                             model,
                             effort,
-                            turn_key=lease.turn_key or turn_key,
+                            turn_key=active_turn_key,
                             source=("local_escalation" if local_escalation else lease.source),
                             policy_version=POLICY_VERSION,
                         ),
@@ -1889,7 +1891,7 @@ class Handler(BaseHTTPRequestHandler):
                         latest_lease,
                         served_model=model,
                         served_effort=effort,
-                        turn_key=turn_key,
+                        turn_key=active_turn_key,
                         policy_version=POLICY_VERSION,
                     )
                     if served_fields is not None:
@@ -1915,7 +1917,7 @@ class Handler(BaseHTTPRequestHandler):
             "tool_replay": tool_replay,
             "lease_synced_to_served": lease_synced_to_served,
             "compacted": compacted,
-            "turn": turn_key[:10] if turn_key else None,
+            "turn": active_turn_key[:10] if active_turn_key else None,
             "attempts": self._attempts,
             "gate": gate,
             "tier": tier,
