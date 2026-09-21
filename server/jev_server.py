@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Jev Codex Router — local server on 127.0.0.1:4319 for the Codex Router.
 
 Receives Responses requests destined for the "jev/auto" model (the Codex
@@ -54,6 +54,7 @@ native tiers (Luna, Terra, Sol, Astra). Native quota failures are returned to
 the caller as-is; Jev never substitutes a third-party model.
 """
 import codecs
+import hashlib
 import http.client
 import json
 import os
@@ -139,6 +140,38 @@ CONTROL_MAX_BYTES = 4096
 # truncated JSON document.
 MODEL_CATALOG_MAX_BYTES = 16 * 1024 * 1024
 
+# Codex can replay the exact same Responses request several times while handling
+# a transient/terminal failure. A routing judgement is pure for that request, so
+# paying TypeSafe again for every transport retry is waste. Cache only successful
+# routing judgements, keyed by a digest of the original request bytes (never the
+# request content itself), and coalesce concurrent identical calls.
+ROUTE_CACHE_TTL_S = 45.0
+ROUTE_CACHE_MAX_ENTRIES = 256
+ROUTE_SINGLEFLIGHT_WAIT_S = 8.0
+
+# Native ChatGPT usage exhaustion is special. If it crosses the generic jev
+# provider boundary as HTTP 429, the outer Codex Router rewrites the body and
+# Codex's HTTP transport spends its retry budget before it can classify the
+# subscription error. For streaming turns we therefore carry terminal quota as
+# a successful HTTP SSE envelope with a fatal Responses error code. Current
+# Codex classifies insufficient_quota as terminal UsageLimitExceeded.
+TERMINAL_QUOTA_TYPES = frozenset({"usage_limit_reached", "usage_not_included"})
+TERMINAL_QUOTA_CODES = frozenset({
+    "usage_limit_reached",
+    "usage_not_included",
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+})
+TERMINAL_QUOTA_HEADERS = frozenset({
+    "workspace_owner_credits_depleted",
+    "workspace_member_credits_depleted",
+    "workspace_owner_usage_limit_reached",
+    "workspace_member_usage_limit_reached",
+})
+
 # The events that close a Responses stream and repeat the response id it opened
 # with. A relayed (tandem) stream is rewritten onto that opening id.
 TERMINAL_EVENT_TYPES = ("response.completed", "response.incomplete", "response.failed")
@@ -181,6 +214,16 @@ ENVELOPE_SCAN_CHARS = 200_000
 _log_lock = threading.Lock()
 _route_status_lock = threading.Lock()
 _last_route_status = {}
+_route_cache_lock = threading.Lock()
+_route_cache = {}
+_route_flights = {}
+
+
+class _RouteFlight:
+    def __init__(self):
+        self.event = threading.Event()
+        self.result = None
+        self.error = None
 
 
 def update_last_route_status(model, effort, gate, at):
@@ -197,6 +240,133 @@ def update_last_route_status(model, effort, gate, at):
 def last_route_status():
     with _route_status_lock:
         return dict(_last_route_status)
+
+
+def _route_cache_key(request_bytes):
+    digest = hashlib.sha256()
+    digest.update(POLICY_VERSION.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(request_bytes)
+    return digest.hexdigest()
+
+
+def _purge_route_cache(now):
+    expired = [key for key, (until, _result) in _route_cache.items() if until <= now]
+    for key in expired:
+        _route_cache.pop(key, None)
+    while len(_route_cache) > ROUTE_CACHE_MAX_ENTRIES:
+        _route_cache.pop(next(iter(_route_cache)))
+
+
+def call_jev_for_route(key, state, request_bytes, timeout=4.0):
+    """One paid Jev route judgement per identical request within the short TTL.
+
+    Returns (result, reuse), where reuse is miss, hit or coalesced. Failures are
+    shared only with callers already waiting on the same in-flight judgement;
+    they are never cached for later requests.
+    """
+    cache_key = _route_cache_key(request_bytes)
+    now = time.monotonic()
+    with _route_cache_lock:
+        _purge_route_cache(now)
+        cached = _route_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1], "hit"
+        flight = _route_flights.get(cache_key)
+        if flight is None:
+            flight = _RouteFlight()
+            _route_flights[cache_key] = flight
+            owner = True
+        else:
+            owner = False
+
+    if not owner:
+        if not flight.event.wait(ROUTE_SINGLEFLIGHT_WAIT_S):
+            # A wedged leader must not wedge the request forever. This bounded
+            # escape is intentionally not cached; normal calls finish in <=4s.
+            return call_jev_routed(key, state, timeout=timeout), "miss"
+        if flight.error is not None:
+            raise flight.error
+        if flight.result is not None:
+            return flight.result, "coalesced"
+        return call_jev_routed(key, state, timeout=timeout), "miss"
+
+    try:
+        result = call_jev_routed(key, state, timeout=timeout)
+        flight.result = result
+        with _route_cache_lock:
+            _route_cache[cache_key] = (time.monotonic() + ROUTE_CACHE_TTL_S, result)
+            _purge_route_cache(time.monotonic())
+        return result, "miss"
+    except Exception as exc:
+        flight.error = exc
+        raise
+    finally:
+        with _route_cache_lock:
+            _route_flights.pop(cache_key, None)
+        flight.event.set()
+
+
+def _error_object(data):
+    try:
+        parsed = json.loads(data.decode("utf-8", "replace"))
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    inner = parsed.get("error")
+    return inner if isinstance(inner, dict) else parsed
+
+
+def terminal_quota_error(status, headers, data):
+    """Return a fatal Codex SSE error for native subscription exhaustion only."""
+    if status != 429:
+        return None
+
+    inner = _error_object(data)
+    error_type = str(inner.get("type") or "").strip().lower()
+    code = str(inner.get("code") or "").strip().lower()
+    reached = str(headers.get("x-codex-rate-limit-reached-type") or "").strip().lower()
+    terminal = (
+        error_type in TERMINAL_QUOTA_TYPES
+        or code in TERMINAL_QUOTA_CODES
+        or reached in TERMINAL_QUOTA_HEADERS
+    )
+    if not terminal:
+        return None
+
+    message = inner.get("message")
+    if not isinstance(message, str) or not message.strip():
+        message = "You have reached your Codex usage limit. Wait for the usage window to reset or check your ChatGPT plan."
+
+    # usage_limit_reached is understood on Codex's HTTP error path but not by
+    # its SSE response.failed parser. insufficient_quota is terminal on both
+    # current Codex Desktop and CLI and maps to UsageLimitExceeded.
+    fatal_code = "usage_not_included" if (
+        error_type == "usage_not_included" or code == "usage_not_included"
+    ) else "insufficient_quota"
+    return {"code": fatal_code, "message": message.strip()}
+
+
+def quota_failure_sse(error):
+    event = {
+        "type": "response.failed",
+        "sequence_number": 0,
+        "response": {
+            "id": "resp_jev_quota",
+            "object": "response",
+            "created_at": int(time.time()),
+            "status": "failed",
+            "background": False,
+            "error": error,
+        },
+    }
+    return (
+        "event: response.failed\n"
+        + "data: "
+        + json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+    ).encode("utf-8")
 
 
 def key_paths():
@@ -924,7 +1094,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": {"message": "control body too large"}})
         raw = self.rfile.read(length) if length else b""
         try:
-            body = json.loads(raw.decode("utf-8"))
+            body = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return self._json(400, {"error": {"message": "invalid json"}})
         if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
@@ -950,7 +1120,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(413, {"error": {"message": f"body too large ({length} bytes)"}})
         raw = self.rfile.read(length) if length else b""
         try:
-            body = json.loads(raw.decode("utf-8"))
+            body = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return self._json(400, {"error": {"message": "invalid json"}})
         state, questions, error = validate_ask(body)
@@ -1024,7 +1194,7 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(raw.decode("utf-8-sig"))
         except ValueError:
             return self._json(400, {"error": {"message": "invalid json"}})
         if not isinstance(payload, dict):
@@ -1068,6 +1238,7 @@ class Handler(BaseHTTPRequestHandler):
 
         tier = depth = conf = None
         jev_ms = None
+        jev_cache = None
         decision = None
         jev_usage = None
         smart_gate = None
@@ -1080,14 +1251,17 @@ class Handler(BaseHTTPRequestHandler):
                 state = jev_state(task, prev_assistant, signals, step)
                 state = enrich_jev_state(state, task, session, repo, failure_streak)
                 try:
-                    result = call_jev_routed(key, state)
+                    result, jev_cache = call_jev_for_route(key, state, raw)
                     decision = decision_from_answers(result.get("answers"))
                     raw_usage = result.get("usage") or {}
                     if not isinstance(raw_usage, dict):
                         raw_usage = {}
-                    jev_usage = {k: v for k, v in raw_usage.items()
-                                 if k in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
-                                 and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                    jev_usage = (
+                        {k: v for k, v in raw_usage.items()
+                         if k in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
+                         and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                        if jev_cache == "miss" else None
+                    )
                     tier, depth, conf = (decision["model"], decision["effort"],
                                          decision["confidence"])
                     model, effort, speed, gate = route(tier, depth)
@@ -1161,6 +1335,7 @@ class Handler(BaseHTTPRequestHandler):
             "route_probabilities": decision["probabilities"] if decision else None,
             "chosen_probability": decision["chosen_probability"] if decision else None,
             "jev_usage": jev_usage,
+            "jev_cache": jev_cache,
             "attempts": self._attempts,
             "gate": gate,
             "tier": tier,
@@ -1310,27 +1485,25 @@ class Handler(BaseHTTPRequestHandler):
                             headerer._sign_message_item(item)
                         data = json.dumps(assembled).encode("utf-8")
                         out_ctype = "application/json"
-                if status != 200 and stream_requested:
-                    out_kind = "json"
-                    # Rewrite upstream error to match OpenAI native format so Codex
-                    # shows the friendly usage-limit message instead of retrying.
-                    try:
-                        parsed = json.loads(data.decode("utf-8", "replace"))
-                        inner = parsed.get("error", parsed) if isinstance(parsed, dict) else {}
-                    except (ValueError, UnicodeDecodeError):
-                        inner = {}
-                    if status == 429:
-                        inner["type"] = "rate_limit_error"
-                        inner["code"] = "rate_limit_exceeded"
-                        inner.setdefault("message", "You have hit your rate limit. Check your workspace usage settings to continue.")
-                    data = json.dumps({"error": inner}).encode("utf-8")
-                    self.send_response(status)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(data)))
+                quota_error = terminal_quota_error(status, resp.headers, data)
+                if quota_error is not None and stream_requested:
+                    # Do not expose terminal ChatGPT quota as HTTP 429 through
+                    # the generic Jev provider. The outer Router would rewrite
+                    # that provider error and Codex would exhaust its HTTP retry
+                    # budget before seeing the subscription semantics. A 200 SSE
+                    # response.failed survives the generic provider hop, and
+                    # Codex treats insufficient_quota as terminal.
+                    out_kind = "sse"
+                    stream = quota_failure_sse(quota_error)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Content-Length", str(len(stream)))
                     self.send_header("Connection", "close")
                     self.end_headers()
-                    self.wfile.write(data)
+                    self.wfile.write(stream)
                 else:
+                    # Ordinary rate-limit 429s remain 429s. They are genuinely
+                    # retryable and must not be mislabeled as exhausted usage.
                     self.send_response(status)
                     self.send_header("Content-Type", out_ctype)
                     self.send_header("Content-Length", str(len(data)))
@@ -1454,7 +1627,7 @@ def installation_check(require_model=True):
                 )
                 resp = conn.getresponse()
                 raw = read_bounded_response(resp, MODEL_CATALOG_MAX_BYTES)
-                catalog = json.loads(raw.decode("utf-8")) if resp.status == 200 else {}
+                catalog = json.loads(raw.decode("utf-8-sig")) if resp.status == 200 else {}
                 rows = catalog.get("data") if isinstance(catalog, dict) else None
                 ids = {
                     row.get("id")
