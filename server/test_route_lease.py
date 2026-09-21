@@ -92,6 +92,41 @@ class TurnIdentity(unittest.TestCase):
         self.assertNotEqual(a, b)
 
 
+class FailureReplayState(unittest.TestCase):
+    def test_failed_tool_replay_does_not_double_count_failure(self):
+        first_key = "tool-hash"
+        streak, replay, fields = lease.failure_state(
+            {"failure_streak": 1},
+            step_type="tool_step",
+            errored=True,
+            tool_key=first_key,
+        )
+        self.assertEqual(streak, 2)
+        self.assertFalse(replay)
+        self.assertEqual(fields["last_tool_step_key"], first_key)
+
+        streak2, replay2, fields2 = lease.failure_state(
+            {**fields},
+            step_type="tool_step",
+            errored=True,
+            tool_key=first_key,
+        )
+        self.assertEqual(streak2, 2)
+        self.assertTrue(replay2)
+        self.assertEqual(fields2["failure_streak"], 2)
+
+    def test_new_user_turn_resets_failure_and_replay_key(self):
+        streak, replay, fields = lease.failure_state(
+            {"failure_streak": 4, "last_tool_step_key": "old"},
+            step_type="user_turn",
+            errored=False,
+            tool_key=None,
+        )
+        self.assertEqual(streak, 0)
+        self.assertFalse(replay)
+        self.assertIsNone(fields["last_tool_step_key"])
+
+
 class LeasePolicy(unittest.TestCase):
     def make_lease(self, turn_key="t"):
         state = lease.lease_fields(
