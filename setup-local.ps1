@@ -1,0 +1,178 @@
+[CmdletBinding()]
+param(
+  [string]$RouterDir = "",
+  [string]$JevEnvFile = "",
+  [string]$StateDir = ""
+)
+
+$ErrorActionPreference = "Stop"
+
+if ($env:OS -ne "Windows_NT") {
+  throw "setup-local.ps1 is the Windows installer. Use setup-local.sh on macOS."
+}
+
+function Resolve-RouterDir([string]$Explicit) {
+  $candidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($Explicit)) { $candidates += $Explicit }
+  if ($env:CODEX_ROUTER_DIR) { $candidates += $env:CODEX_ROUTER_DIR }
+  $candidates += @(
+    (Join-Path (Split-Path -Parent $PSScriptRoot) "codex-router"),
+    (Join-Path $HOME "Documents\GitHub\codex-router"),
+    (Join-Path $HOME "GitHub\codex-router"),
+    (Join-Path $HOME "source\repos\codex-router")
+  )
+  foreach ($candidate in $candidates) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    $root = [IO.Path]::GetFullPath($candidate)
+    if (Test-Path -LiteralPath (Join-Path $root "model-router.ps1") -PathType Leaf) {
+      return $root
+    }
+  }
+  throw "Codex Router checkout not found. Pass -RouterDir C:\path\to\codex-router."
+}
+
+function Resolve-Python {
+  $py = Get-Command py.exe -ErrorAction SilentlyContinue
+  if ($py) {
+    return [pscustomobject]@{ Path = $py.Source; Prefix = @("-3") }
+  }
+  $python = Get-Command python.exe -ErrorAction SilentlyContinue
+  if ($python) {
+    return [pscustomobject]@{ Path = $python.Source; Prefix = @() }
+  }
+  throw "Python 3 was not found. Install Python 3.11+ or the Python launcher."
+}
+
+function Invoke-ModelRouter([string[]]$Arguments) {
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ModelRouter @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex Router command failed: $($Arguments -join ' ')"
+  }
+}
+
+function Test-ModelRouter([string[]]$Arguments) {
+  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ModelRouter @Arguments *> $null
+  return $LASTEXITCODE -eq 0
+}
+
+$RepoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
+$RouterDir = Resolve-RouterDir $RouterDir
+$script:ModelRouter = Join-Path $RouterDir "model-router.ps1"
+$curate = Join-Path $RouterDir "src\curate-models.mjs"
+$installService = Join-Path $RepoRoot "server\install-service.ps1"
+$server = Join-Path $RepoRoot "server\jev_server.py"
+$report = Join-Path $RepoRoot "server\report_shadow_eval.py"
+
+if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) {
+  throw "Node.js is required by Codex Router."
+}
+$python = Resolve-Python
+
+if ([string]::IsNullOrWhiteSpace($JevEnvFile)) {
+  $JevEnvFile = if ($env:JEV_ENV_FILE) { $env:JEV_ENV_FILE } else { Join-Path $HOME ".hermes\.env" }
+}
+$JevEnvFile = [IO.Path]::GetFullPath($JevEnvFile)
+if (-not (Test-Path -LiteralPath $JevEnvFile -PathType Leaf)) {
+  throw "TypeSafe/Jev key file not found: $JevEnvFile. Create $HOME\.hermes\.env with one line: TYPESAFE_API_KEY=YOUR_KEY. Never paste the key into chat."
+}
+
+if ([string]::IsNullOrWhiteSpace($StateDir)) {
+  $StateDir = if ($env:CODEX_ROUTER_STATE_DIR) {
+    $env:CODEX_ROUTER_STATE_DIR
+  } else {
+    Join-Path $HOME ".codex\codex-router"
+  }
+}
+$StateDir = [IO.Path]::GetFullPath($StateDir)
+
+Write-Host "== 1/8  Codex Router =="
+if (-not (Test-ModelRouter @("codex", "status"))) {
+  throw "Codex Router is not installed/running from $RouterDir. Install it with .\install.ps1 -Target codex -Guided -WithTray, then rerun this script."
+}
+Invoke-ModelRouter @("codex", "doctor")
+
+Write-Host "== 2/8  Codex ChatGPT session =="
+$codex = Get-Command codex.exe -ErrorAction SilentlyContinue
+if ($codex) {
+  & $codex.Source login status
+  if ($LASTEXITCODE -ne 0) {
+    throw "Codex is not logged in. Run 'codex login' once, then rerun this script."
+  }
+}
+Invoke-ModelRouter @("codex", "chatgpt-session", "enable")
+
+Write-Host "== 3/8  Jev generic provider =="
+if (Test-ModelRouter @("codex", "providers", "generic", "show", "jev", "--json")) {
+  Invoke-ModelRouter @(
+    "codex", "providers", "generic", "edit", "jev",
+    "--name", "Jev Router",
+    "--base-url", "http://127.0.0.1:4319/v1",
+    "--adapter", "openai-responses",
+    "--allow-private"
+  )
+} else {
+  Invoke-ModelRouter @(
+    "codex", "providers", "generic", "add", "jev",
+    "--name", "Jev Router",
+    "--base-url", "http://127.0.0.1:4319/v1",
+    "--adapter", "openai-responses",
+    "--allow-private"
+  )
+}
+
+Write-Host "== 4/8  Windows background service + daily eval =="
+$serviceArgs = @(
+  "-NoProfile", "-ExecutionPolicy", "Bypass",
+  "-File", $installService,
+  "-RepoRoot", $RepoRoot,
+  "-JevEnvFile", $JevEnvFile,
+  "-StateDir", $StateDir
+)
+& powershell.exe @serviceArgs
+if ($LASTEXITCODE -ne 0) {
+  throw "Windows Jev service installation failed."
+}
+
+Write-Host "== 5/8  Provider discovery =="
+Invoke-ModelRouter @("codex", "providers", "generic", "test", "jev")
+
+Write-Host "== 6/8  Curate jev/auto =="
+& node.exe $curate jev --models auto --efforts low,medium,high,xhigh,max --apply
+if ($LASTEXITCODE -ne 0) {
+  throw "Curating jev/auto failed."
+}
+
+Write-Host "== 7/8  Full readiness =="
+$env:JEV_ENV_FILE = $JevEnvFile
+$env:CODEX_ROUTER_STATE_DIR = $StateDir
+$checkArgs = @($python.Prefix) + @($server, "--check")
+& $python.Path @checkArgs
+if ($LASTEXITCODE -ne 0) {
+  throw "Full Jev readiness check failed."
+}
+
+Write-Host "== 8/8  Seed rolling Shadow Eval report =="
+$shadowLog = Join-Path $StateDir "jev-shadow-eval.jsonl"
+if (Test-Path -LiteralPath $shadowLog -PathType Leaf) {
+  $reportArgs = @($python.Prefix) + @(
+    $report, "--days", "7", "--log", $shadowLog, "--write",
+    "--json-out", (Join-Path $StateDir "jev-shadow-eval-7d.json"),
+    "--text-out", (Join-Path $StateDir "jev-shadow-eval-7d.txt")
+  )
+  & $python.Path @reportArgs
+} else {
+  Write-Host "No production turns yet; the first request will create the Shadow Eval log."
+}
+
+Write-Host ""
+Write-Host "READY: Jev Codex Router is installed for Windows."
+Write-Host "Fully quit and reopen Codex Desktop, then choose: Jev Codex Router (jev/auto)"
+Write-Host ""
+Write-Host "Shadow Eval:"
+Write-Host "  raw log:   $StateDir\jev-shadow-eval.jsonl"
+Write-Host "  7d text:   $StateDir\jev-shadow-eval-7d.txt"
+Write-Host "  7d json:   $StateDir\jev-shadow-eval-7d.json"
+Write-Host "  scheduled: daily at 03:15, StartWhenAvailable"
+Write-Host ""
+Write-Host "Manual report:"
+Write-Host "  py -3 server\report_shadow_eval.py --days 7 --write"
