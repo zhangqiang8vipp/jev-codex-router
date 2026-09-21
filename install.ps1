@@ -180,13 +180,18 @@ function Install-CodexRouterCheckout {
     throw "$target exists but is not a valid Codex Router checkout."
   }
 
-  Prepare-CodexRouterVenv $target
+  return [IO.Path]::GetFullPath($target)
+}
+
+function Ensure-CodexRouterBaseInstalled([string]$Directory) {
+  Prepare-CodexRouterVenv $Directory
 
   # Install the upstream router in credential-free idle mode. The pre-created
   # venv pins it to system CPython; if uv is installed, upstream may still use
   # uv pip to install locked wheels into that venv, but it no longer chooses
   # the Python runtime.
-  $routerInstall = Join-Path $target "install.ps1"
+  Write-Step "Installing/repairing the Codex Router base service"
+  $routerInstall = Join-Path $Directory "install.ps1"
   $routerInstallArgs = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
@@ -206,8 +211,6 @@ function Install-CodexRouterCheckout {
     }
     throw "Codex Router installer exited with status $LASTEXITCODE."
   }
-
-  return [IO.Path]::GetFullPath($target)
 }
 
 function Resolve-RouterCheckout([string]$Explicit) {
@@ -429,6 +432,7 @@ Ensure-Dependency "Python 3" { [bool](Get-Command py.exe -ErrorAction SilentlyCo
 Ensure-Dependency ".NET 8 SDK" { Test-DotNet8 } "Microsoft.DotNet.SDK.8" "Install the .NET 8 SDK and rerun."
 
 $RouterDir = Resolve-RouterCheckout $RouterDir
+Ensure-CodexRouterBaseInstalled $RouterDir
 $JevEnvFile = Ensure-JevKeyFile $JevEnvFile
 
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
