@@ -51,8 +51,38 @@ function Invoke-ModelRouter([string[]]$Arguments) {
 }
 
 function Test-ModelRouter([string[]]$Arguments) {
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ModelRouter @Arguments *> $null
-  return $LASTEXITCODE -eq 0
+  $savedPreference = $ErrorActionPreference
+  try {
+    # Windows PowerShell 5.1 can promote child-process stderr to a terminating
+    # NativeCommandError while ErrorActionPreference=Stop. Probes intentionally
+    # use non-zero exits, so judge only the child process exit code.
+    $ErrorActionPreference = "Continue"
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ModelRouter @Arguments *> $null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  } finally {
+    $ErrorActionPreference = $savedPreference
+  }
+}
+
+function Get-GenericProviders {
+  $savedPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $raw = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ModelRouter codex providers generic list --json 2>$null | Out-String)
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $savedPreference
+  }
+  if ($code -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+    throw "Could not list Codex Router generic providers."
+  }
+  try {
+    return @((ConvertFrom-Json $raw).providers)
+  } catch {
+    throw "Codex Router returned invalid generic-provider JSON: $($_.Exception.Message)"
+  }
 }
 
 $RepoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -126,23 +156,16 @@ if ($codex) {
 Invoke-ModelRouter @("codex", "chatgpt-session", "enable")
 
 Write-Host "== 3/10  Jev generic provider =="
-if (Test-ModelRouter @("codex", "providers", "generic", "show", "jev", "--json")) {
-  Invoke-ModelRouter @(
-    "codex", "providers", "generic", "edit", "jev",
-    "--name", "Jev Router",
-    "--base-url", "http://127.0.0.1:4319/v1",
-    "--adapter", "openai-responses",
-    "--allow-private"
-  )
-} else {
-  Invoke-ModelRouter @(
-    "codex", "providers", "generic", "add", "jev",
-    "--name", "Jev Router",
-    "--base-url", "http://127.0.0.1:4319/v1",
-    "--adapter", "openai-responses",
-    "--allow-private"
-  )
-}
+$genericProviders = Get-GenericProviders
+$jevProviderExists = [bool]($genericProviders | Where-Object { $_.id -eq "jev" } | Select-Object -First 1)
+$jevProviderAction = if ($jevProviderExists) { "edit" } else { "add" }
+Invoke-ModelRouter @(
+  "codex", "providers", "generic", $jevProviderAction, "jev",
+  "--name", "Jev Router",
+  "--base-url", "http://127.0.0.1:4319/v1",
+  "--adapter", "openai-responses",
+  "--allow-private"
+)
 
 Write-Host "== 4/10  Windows background service + daily eval =="
 $serviceArgs = @(
