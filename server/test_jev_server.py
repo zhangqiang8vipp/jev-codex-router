@@ -48,8 +48,13 @@ class InstallationCheck(unittest.TestCase):
         def __init__(self, body):
             self.body = body
 
-        def read(self, _size=None):
-            return self.body
+        def getheader(self, name):
+            if name.lower() == "content-length":
+                return str(len(self.body))
+            return None
+
+        def read(self, size=None):
+            return self.body if size is None else self.body[:size]
 
     class FakeConnection:
         def __init__(self, *_args, **_kwargs):
@@ -99,6 +104,37 @@ class InstallationCheck(unittest.TestCase):
             result = jev.installation_check(require_model=False)
         self.assertTrue(result["ok"])
         self.assertNotIn("jev_model", [item["name"] for item in result["checks"]])
+
+    def test_readiness_accepts_a_catalog_larger_than_the_old_512k_cap(self):
+        filler = "x" * (600 * 1024)
+        body = json.dumps({
+            "data": [
+                {"id": "native/filler", "description": filler},
+                {"id": jev.VIRTUAL_MODEL_SLUG},
+            ]
+        }).encode()
+
+        class LargeCatalogConnection(self.FakeConnection):
+            def getresponse(self_inner):
+                if "/_codex-router/" in self_inner.path and self_inner.path.endswith("/v1/models"):
+                    return InstallationCheck.FakeResponse(body)
+                return InstallationCheck.FakeResponse(b'{"ok":true}')
+
+        patches = self.dependencies()
+        with patches[0], patches[1], patches[2], mock.patch.object(
+            jev.http.client, "HTTPConnection", LargeCatalogConnection
+        ):
+            result = jev.installation_check(require_model=True)
+
+        self.assertTrue(result["ok"])
+        model_check = next(item for item in result["checks"] if item["name"] == "jev_model")
+        self.assertEqual(model_check["detail"], "jev/auto loaded")
+
+    def test_bounded_reader_rejects_an_oversized_catalog_explicitly(self):
+        body = b"x" * (jev.MODEL_CATALOG_MAX_BYTES + 1)
+        response = self.FakeResponse(body)
+        with self.assertRaisesRegex(ValueError, "too large"):
+            jev.read_bounded_response(response, jev.MODEL_CATALOG_MAX_BYTES)
 
 
 class ResponseIdContinuity(unittest.TestCase):
