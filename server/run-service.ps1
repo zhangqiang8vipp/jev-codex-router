@@ -81,13 +81,37 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $python = Resolve-Python
 $server = Join-Path $RepoRoot "server\jev_server.py"
+$patcher = Join-Path $RepoRoot "server\patch_codex_router.py"
 if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
   throw "jev_server.py not found at $server"
 }
 
 $outLog = Join-Path $StateDir "jev-router.out.log"
 $errLog = Join-Path $StateDir "jev-router.err.log"
-$argsList = @($python.Prefix) + @($server)
 
+# Prefer Codex Router's authenticated exact-route probe over temporarily moving
+# native-redirect.json. The patch is a guarded one-line source change and only
+# restarts Codex Router when an upstream update removed it. If the upstream
+# source shape changes unexpectedly, keep Jev available on the legacy
+# suppression fallback rather than turning a compatibility issue into downtime.
+$exactRouteReady = $false
+if (Test-Path -LiteralPath $patcher -PathType Leaf) {
+  $patchArgs = @($python.Prefix) + @(
+    $patcher,
+    "--router-dir", $RouterDir,
+    "--restart"
+  )
+  & $python.Path @patchArgs 1>> $outLog 2>> $errLog
+  $exactRouteReady = ($LASTEXITCODE -eq 0)
+}
+if ($exactRouteReady) {
+  $env:JEV_EXACT_NATIVE_ROUTE = "1"
+} else {
+  Remove-Item Env:\JEV_EXACT_NATIVE_ROUTE -ErrorAction SilentlyContinue
+  "[jev-router] scoped exact native route unavailable; using legacy redirect suppression fallback" |
+    Out-File -LiteralPath $errLog -Append -Encoding utf8
+}
+
+$argsList = @($python.Prefix) + @($server)
 & $python.Path @argsList 1>> $outLog 2>> $errLog
 exit $LASTEXITCODE
