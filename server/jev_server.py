@@ -486,6 +486,8 @@ def safe_quota_headers(headers):
         ):
             continue
         value = str(raw_value).strip()
+        if "\r" in value or "\n" in value:
+            continue
         if value and len(value) <= 512:
             out[name] = value
             if len(out) >= _QUOTA_SAFE_HEADER_MAX:
