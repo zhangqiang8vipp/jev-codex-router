@@ -183,6 +183,24 @@ class JevExactRouteCapability(unittest.TestCase):
                 ):
                     self.assertTrue(jev.exact_native_route_supported())
 
+    def test_capability_rejects_old_v1_arm_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            router, state = self._armed_fixture(root)
+            marker = patcher.marker_path(state)
+            value = __import__("json").loads(marker.read_text(encoding="utf-8"))
+            value["version"] = 1
+            marker.write_text(__import__("json").dumps(value), encoding="utf-8")
+            with mock.patch.object(jev, "CODEX_ROUTER_DIR", str(root)), \
+                 mock.patch.object(jev, "STATE", str(state)), \
+                 mock.patch.dict(
+                     os.environ,
+                     {jev._EXACT_NATIVE_ROUTE_ENV: "1"},
+                     clear=False,
+                 ):
+                jev._exact_native_route_cache = None
+                self.assertFalse(jev.exact_native_route_supported())
+
     def test_capability_rejects_unarmed_patched_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
