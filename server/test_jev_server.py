@@ -4,6 +4,7 @@ The server itself is a long-lived process on loopback, so these tests hold the
 parts that do not need it: key loading, installation readiness, response-stream
 continuity, routing-policy decisions, and bounded Jev task construction.
 """
+import base64
 import json
 import os
 import tempfile
@@ -209,24 +210,31 @@ class RouteDecisionCache(unittest.TestCase):
 
 
 class TerminalQuotaTranslation(unittest.TestCase):
-    def test_native_usage_limit_becomes_a_terminal_sse_quota_code(self):
+    def test_usage_limit_is_canonicalized_for_codex_http_classifier(self):
         body = json.dumps({
             "error": {
                 "type": "usage_limit_reached",
                 "message": "The usage limit has been reached",
                 "plan_type": "pro",
+                "resets_at": 1_738_888_888,
             }
         }).encode()
         error = jev.terminal_quota_error(429, {}, body)
-        self.assertEqual(error["code"], "insufficient_quota")
+        self.assertEqual(error["type"], "usage_limit_reached")
         self.assertEqual(error["message"], "The usage limit has been reached")
+        self.assertEqual(error["plan_type"], "pro")
+        self.assertEqual(error["resets_at"], 1_738_888_888)
 
-        wire = jev.quota_failure_sse(error).decode("utf-8")
-        payload = json.loads(next(
-            line[6:] for line in wire.splitlines() if line.startswith("data: ")
-        ))
-        self.assertEqual(payload["type"], "response.failed")
-        self.assertEqual(payload["response"]["error"]["code"], "insufficient_quota")
+    def test_usage_limit_wire_variant_is_normalized(self):
+        body = b'{"error":{"type":"usage_limit","message":"limit","plan_type":"pro"}}'
+        error = jev.terminal_quota_error(429, {}, body)
+        self.assertEqual(error["type"], "usage_limit_reached")
+
+    def test_insufficient_quota_type_without_code_is_terminal(self):
+        body = b'{"error":{"type":"insufficient_quota","message":"credits exhausted"}}'
+        error = jev.terminal_quota_error(429, {}, body)
+        self.assertEqual(error["type"], "insufficient_quota")
+        self.assertEqual(error["code"], "insufficient_quota")
 
     def test_transient_rate_limit_stays_retryable_http_429(self):
         body = json.dumps({
@@ -238,10 +246,92 @@ class TerminalQuotaTranslation(unittest.TestCase):
         }).encode()
         self.assertIsNone(jev.terminal_quota_error(429, {}, body))
 
-    def test_codex_hard_stop_header_is_terminal_even_with_sparse_body(self):
-        headers = {"x-codex-rate-limit-reached-type": "workspace_owner_credits_depleted"}
-        error = jev.terminal_quota_error(429, headers, b'{"error":{"message":"limit"}}')
-        self.assertEqual(error["code"], "insufficient_quota")
+    def test_codex_hard_stop_header_is_standard_usage_limit(self):
+        headers = {
+            "x-codex-rate-limit-reached-type":
+                "workspace_owner_credits_depleted",
+        }
+        error = jev.terminal_quota_error(
+            429,
+            headers,
+            b'{"error":{"message":"limit","plan_type":"business"}}',
+        )
+        self.assertEqual(error["type"], "usage_limit_reached")
+        self.assertEqual(error["plan_type"], "business")
+
+    def test_active_limit_at_100_is_terminal_even_with_generic_body(self):
+        headers = {
+            "x-codex-active-limit": "codex_bengalfox",
+            "x-codex-bengalfox-primary-used-percent": "100",
+            "x-codex-bengalfox-primary-reset-at": "1738888888",
+        }
+        error = jev.terminal_quota_error(
+            429,
+            headers,
+            b'{"error":{"message":"temporary error"}}',
+        )
+        self.assertEqual(error["type"], "usage_limit_reached")
+
+    def test_credits_zero_alone_does_not_turn_generic_429_into_usage_limit(self):
+        headers = {
+            "x-codex-credits-has-credits": "false",
+            "x-codex-credits-unlimited": "false",
+            "x-codex-credits-balance": "0",
+        }
+        body = b'{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded"}}'
+        self.assertIsNone(jev.terminal_quota_error(429, headers, body))
+
+    def test_internal_failures_never_become_usage_limit(self):
+        quotaish = b'{"error":{"type":"usage_limit_reached","message":"limit"}}'
+        for status in (500, 502, 503, 504):
+            with self.subTest(status=status):
+                self.assertIsNone(jev.terminal_quota_error(status, {}, quotaish))
+
+    def test_passthrough_envelope_preserves_only_safe_quota_metadata(self):
+        error = {
+            "type": "usage_limit_reached",
+            "message": "limit",
+            "plan_type": "pro",
+            "resets_at": 1_738_888_888,
+        }
+        wire = jev.quota_passthrough_body(error, {
+            "Retry-After": "7",
+            "X-Codex-Active-Limit": "codex_bengalfox",
+            "X-Codex-Bengalfox-Primary-Used-Percent": "100",
+            "X-Codex-Rate-Limit-Reached-Type":
+                "workspace_member_usage_limit_reached",
+            "X-Private-Header": "must-not-cross",
+            "Authorization": "must-not-cross",
+        })
+        outer = json.loads(wire)
+        marker = outer["error"]["message"]
+        self.assertTrue(marker.startswith(jev._NATIVE_QUOTA_MARKER_PREFIX))
+        token = marker[len(jev._NATIVE_QUOTA_MARKER_PREFIX):]
+        token += "=" * (-len(token) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(token).decode())
+        self.assertEqual(decoded["error"], error)
+        self.assertEqual(decoded["headers"]["retry-after"], "7")
+        self.assertEqual(
+            decoded["headers"]["x-codex-bengalfox-primary-used-percent"],
+            "100",
+        )
+        self.assertNotIn("x-private-header", decoded["headers"])
+        self.assertNotIn("authorization", decoded["headers"])
+
+    def test_sse_fallback_is_still_terminal_when_node_hook_is_unavailable(self):
+        error = {
+            "type": "usage_limit_reached",
+            "message": "limit",
+        }
+        wire = jev.quota_failure_sse(error).decode("utf-8")
+        payload = json.loads(next(
+            line[6:] for line in wire.splitlines() if line.startswith("data: ")
+        ))
+        self.assertEqual(payload["type"], "response.failed")
+        self.assertEqual(
+            payload["response"]["error"]["code"],
+            "insufficient_quota",
+        )
 
 
 class ResponseIdContinuity(unittest.TestCase):
