@@ -130,7 +130,9 @@ class CodexRouterExactRoutePatch(unittest.TestCase):
             source_dir.mkdir()
             router = source_dir / "router.mjs"
             router.write_text(
-                upstream_fixture(patcher.PATCHED_CONDITION),
+                patcher.patch_router_text(
+                    upstream_fixture(patcher.ORIGINAL_CONDITION)
+                )[0],
                 encoding="utf-8",
             )
             state = root / "state"
@@ -154,7 +156,9 @@ class JevExactRouteCapability(unittest.TestCase):
         source_dir.mkdir()
         router = source_dir / "router.mjs"
         router.write_text(
-            upstream_fixture(patcher.PATCHED_CONDITION),
+            patcher.patch_router_text(
+                upstream_fixture(patcher.ORIGINAL_CONDITION)
+            )[0],
             encoding="utf-8",
         )
         state = root / "state"
@@ -185,7 +189,9 @@ class JevExactRouteCapability(unittest.TestCase):
             source_dir = root / "src"
             source_dir.mkdir()
             (source_dir / "router.mjs").write_text(
-                upstream_fixture(patcher.PATCHED_CONDITION),
+                patcher.patch_router_text(
+                    upstream_fixture(patcher.ORIGINAL_CONDITION)
+                )[0],
                 encoding="utf-8",
             )
             state = root / "state"
