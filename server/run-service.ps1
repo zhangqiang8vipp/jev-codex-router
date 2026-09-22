@@ -90,10 +90,11 @@ $outLog = Join-Path $StateDir "jev-router.out.log"
 $errLog = Join-Path $StateDir "jev-router.err.log"
 
 # Prefer Codex Router's authenticated exact-route probe over temporarily moving
-# native-redirect.json. The patch is a guarded one-line source change and only
-# restarts Codex Router when an upstream update removed it. If the upstream
-# source shape changes unexpectedly, keep Jev available on the legacy
-# suppression fallback rather than turning a compatibility issue into downtime.
+# native-redirect.json. The managed patch also restores native Codex hard-quota
+# 429 semantics after the local Jev provider hop. Both hooks are guarded and the
+# router restarts only when the source/arm marker changes. If upstream source
+# shape changes unexpectedly, keep Jev available on compatibility fallbacks
+# rather than turning a compatibility issue into downtime.
 $exactRouteReady = $false
 if (Test-Path -LiteralPath $patcher -PathType Leaf) {
   $patchArgs = @($python.Prefix) + @(
