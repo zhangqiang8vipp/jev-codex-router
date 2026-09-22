@@ -432,8 +432,6 @@ def terminal_quota_error(status, headers, data):
     ) and reached not in TERMINAL_QUOTA_HEADERS and not window_exhausted:
         canonical_type = "insufficient_quota"
     else:
-        # usage_limit is an observed wire variant. Canonicalize it to the exact
-        # type current Codex maps to UsageLimitReached.
         canonical_type = "usage_limit_reached"
 
     error = {
@@ -2440,3 +2438,72 @@ def installation_check(require_model=True):
                 catalog = json.loads(raw.decode("utf-8-sig")) if resp.status == 200 else {}
                 rows = catalog.get("data") if isinstance(catalog, dict) else None
                 ids = {
+                    row.get("id")
+                    for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
+                } if isinstance(rows, list) else set()
+                loaded = VIRTUAL_MODEL_SLUG in ids
+                checks.append({
+                    "name": "jev_model",
+                    "ok": loaded,
+                    "detail": "jev/auto loaded"
+                              if loaded
+                              else "jev/auto missing; run setup-local.sh or curate-models, then restart Codex Router",
+                })
+            except Exception as exc:
+                checks.append({
+                    "name": "jev_model",
+                    "ok": False,
+                    "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
+                })
+            finally:
+                conn.close()
+        else:
+            checks.append({
+                "name": "jev_model",
+                "ok": False,
+                "detail": "skipped: Codex Router or caller secret not ready",
+            })
+
+    return {
+        "ok": all(item["ok"] for item in checks),
+        "service": "jev-router",
+        "version": VERSION,
+        "policy_version": POLICY_VERSION,
+        "checks": checks,
+    }
+
+
+def print_installation_check(result):
+    for item in result["checks"]:
+        mark = "OK" if item["ok"] else "FAIL"
+        print(f"[{mark:4}] {item['name']}: {item['detail']}")
+    print("READY" if result["ok"] else "NOT READY")
+    return 0 if result["ok"] else 1
+
+
+def main(argv=None):
+    argv = list(argv if argv is not None else __import__("sys").argv[1:])
+    if argv == ["--check"]:
+        return print_installation_check(installation_check(require_model=True))
+    if argv == ["--check-core"]:
+        return print_installation_check(installation_check(require_model=False))
+    if argv:
+        print("usage: python3 server/jev_server.py [--check|--check-core]", flush=True)
+        return 2
+
+    server = ThreadingHTTPServer(LISTEN, Handler)
+    server.daemon_threads = True
+    os.makedirs(STATE, exist_ok=True)
+    for path in (LOG_PATH, SHADOW_EVAL_PATH, SESSION_PATH):
+        try:
+            if os.path.exists(path):
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
+    print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
