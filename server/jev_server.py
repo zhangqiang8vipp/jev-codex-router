@@ -54,6 +54,7 @@ native tiers (Luna, Terra, Sol, Astra). Terminal native quota failures are
 carried across the generic-provider hop as a non-retryable Responses failure;
 Jev never substitutes a third-party model.
 """
+import base64
 import codecs
 import contextlib
 import hashlib
@@ -163,7 +164,12 @@ ROUTE_SINGLEFLIGHT_WAIT_S = 8.0
 # subscription error. For streaming turns we therefore carry terminal quota as
 # a successful HTTP SSE envelope with a fatal Responses error code. Current
 # Codex classifies insufficient_quota as terminal UsageLimitExceeded.
-TERMINAL_QUOTA_TYPES = frozenset({"usage_limit_reached", "usage_not_included"})
+TERMINAL_QUOTA_TYPES = frozenset({
+    "usage_limit_reached",
+    "usage_limit",
+    "usage_not_included",
+    "insufficient_quota",
+})
 TERMINAL_QUOTA_CODES = frozenset({
     "usage_limit_reached",
     "usage_not_included",
@@ -347,37 +353,167 @@ def _error_object(data):
     return inner if isinstance(inner, dict) else parsed
 
 
+def _header_value(headers, name):
+    try:
+        value = headers.get(name)
+    except AttributeError:
+        value = None
+    if value is None and isinstance(headers, dict):
+        wanted = name.lower()
+        for key, candidate in headers.items():
+            if str(key).lower() == wanted:
+                value = candidate
+                break
+    return str(value).strip() if value is not None else ""
+
+
+def _quota_window_exhausted(headers):
+    """Strong native evidence that the current Codex usage window is exhausted."""
+    active = _header_value(headers, "x-codex-active-limit").lower().replace("_", "-")
+    prefixes = ["x-codex"]
+    if active and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", active):
+        prefixes.insert(0, f"x-{active}")
+    for prefix in prefixes:
+        for window in ("primary", "secondary"):
+            raw = _header_value(headers, f"{prefix}-{window}-used-percent")
+            try:
+                used = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if used >= 100.0:
+                return True
+    return False
+
+
 def terminal_quota_error(status, headers, data):
-    """Return a fatal Codex SSE error for native subscription exhaustion only."""
+    """Return a canonical native quota error, or None for retryable 429s.
+
+    Codex's HTTP error bridge recognizes usage_limit_reached as the rich
+    ChatGPT-plan usage-limit condition. Keep that class distinct from ordinary
+    TPM/RPM rate limiting and from local/router failures.
+    """
     if status != 429:
         return None
 
     inner = _error_object(data)
     error_type = str(inner.get("type") or "").strip().lower()
     code = str(inner.get("code") or "").strip().lower()
-    reached = str(headers.get("x-codex-rate-limit-reached-type") or "").strip().lower()
+    reached = _header_value(headers, "x-codex-rate-limit-reached-type").lower()
+    window_exhausted = _quota_window_exhausted(headers)
     terminal = (
         error_type in TERMINAL_QUOTA_TYPES
         or code in TERMINAL_QUOTA_CODES
         or reached in TERMINAL_QUOTA_HEADERS
+        or window_exhausted
     )
     if not terminal:
         return None
 
     message = inner.get("message")
     if not isinstance(message, str) or not message.strip():
-        message = "You have reached your Codex usage limit. Wait for the usage window to reset or check your ChatGPT plan."
+        message = "You have reached your Codex usage limit."
 
-    # usage_limit_reached is understood on Codex's HTTP error path but not by
-    # its SSE response.failed parser. insufficient_quota is terminal on both
-    # current Codex Desktop and CLI and maps to UsageLimitExceeded.
-    fatal_code = "usage_not_included" if (
-        error_type == "usage_not_included" or code == "usage_not_included"
-    ) else "insufficient_quota"
-    return {"code": fatal_code, "message": message.strip()}
+    plan_type = inner.get("plan_type")
+    if not isinstance(plan_type, str) or not plan_type.strip() or len(plan_type) > 64:
+        plan_type = None
+    resets_at = inner.get("resets_at")
+    if isinstance(resets_at, bool) or not isinstance(resets_at, int) or resets_at <= 0:
+        resets_at = None
+
+    quota_only_codes = TERMINAL_QUOTA_CODES - {
+        "usage_limit_reached",
+        "usage_not_included",
+    }
+    if error_type == "usage_not_included" or code == "usage_not_included":
+        canonical_type = "usage_not_included"
+    elif (
+        error_type == "insufficient_quota"
+        or code in quota_only_codes
+    ) and reached not in TERMINAL_QUOTA_HEADERS and not window_exhausted:
+        canonical_type = "insufficient_quota"
+    else:
+        # usage_limit is an observed wire variant. Canonicalize it to the exact
+        # type current Codex maps to UsageLimitReached.
+        canonical_type = "usage_limit_reached"
+
+    error = {
+        "type": canonical_type,
+        "message": message.strip(),
+    }
+    if canonical_type == "insufficient_quota":
+        error["code"] = code if code in TERMINAL_QUOTA_CODES else "insufficient_quota"
+    if plan_type is not None:
+        error["plan_type"] = plan_type.strip()
+    if resets_at is not None:
+        error["resets_at"] = resets_at
+    return error
+
+
+_QUOTA_SAFE_HEADER_NAMES = frozenset({
+    "retry-after",
+    "x-codex-active-limit",
+    "x-codex-promo-message",
+    "x-codex-rate-limit-reached-type",
+    "x-codex-credits-has-credits",
+    "x-codex-credits-unlimited",
+    "x-codex-credits-balance",
+})
+_QUOTA_WINDOW_HEADER_RX = re.compile(
+    r"^x-[a-z0-9][a-z0-9-]{0,63}-(?:primary|secondary)-"
+    r"(?:used-percent|window-minutes|reset-at)$"
+)
+_QUOTA_LIMIT_NAME_RX = re.compile(r"^x-[a-z0-9][a-z0-9-]{0,63}-limit-name$")
+_NATIVE_QUOTA_MARKER_PREFIX = "__JEV_NATIVE_QUOTA_V1__:"
+
+
+def safe_quota_headers(headers):
+    """Copy only Codex quota metadata needed by the native HTTP classifier/UI."""
+    out = {}
+    try:
+        items = headers.items()
+    except AttributeError:
+        items = []
+    for raw_name, raw_value in items:
+        name = str(raw_name).strip().lower()
+        if not (
+            name in _QUOTA_SAFE_HEADER_NAMES
+            or _QUOTA_WINDOW_HEADER_RX.fullmatch(name)
+            or _QUOTA_LIMIT_NAME_RX.fullmatch(name)
+        ):
+            continue
+        value = str(raw_value).strip()
+        if value and len(value) <= 512:
+            out[name] = value
+    return out
+
+
+def quota_passthrough_body(error, headers):
+    """Encode a local-only quota envelope for the managed caller-edge hook."""
+    payload = {
+        "version": 1,
+        "error": error,
+        "headers": safe_quota_headers(headers),
+    }
+    token = base64.urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    marker = _NATIVE_QUOTA_MARKER_PREFIX + token
+    return json.dumps({
+        "error": {
+            "type": "insufficient_quota",
+            "code": "insufficient_quota",
+            "message": marker,
+        }
+    }, separators=(",", ":")).encode("utf-8")
 
 
 def quota_failure_sse(error):
+    # Compatibility fallback for a Codex Router without the managed quota hook.
+    error = dict(error)
+    if error.get("type") == "usage_not_included":
+        error["code"] = "usage_not_included"
+    else:
+        error["code"] = "insufficient_quota"
     event = {
         "type": "response.failed",
         "sequence_number": 0,
@@ -412,6 +548,7 @@ _EXACT_NATIVE_ROUTE_MARKER = "jev-exact-native-route.json"
 _EXACT_NATIVE_ROUTE_CONDITION = b"if (!registeredRoute && requestedModel && !exactRouteProbe) {"
 _EXACT_NATIVE_ROUTE_PROBE = b"const exactRouteProbe = exactRouteProbeRequested(request.headers);"
 _EXACT_NATIVE_ROUTE_REDIRECT = b"const redirect = MODEL_BY_SLUG.get(readNativeRedirect());"
+_NATIVE_QUOTA_PASSTHROUGH_HOOK = b"__JEV_NATIVE_QUOTA_V1__"
 _exact_native_route_cache = None
 
 
@@ -468,6 +605,7 @@ def exact_native_route_supported():
             and _EXACT_NATIVE_ROUTE_CONDITION in data
             and _EXACT_NATIVE_ROUTE_PROBE in data
             and _EXACT_NATIVE_ROUTE_REDIRECT in data
+            and _NATIVE_QUOTA_PASSTHROUGH_HOOK in data
         )
     _exact_native_route_cache = (*cache_key, supported)
     return supported
@@ -1814,7 +1952,9 @@ class Handler(BaseHTTPRequestHandler):
                 # response.failed SSE. It is handled, not a healthy upstream
                 # success and not a reason to probe another tier.
                 breaker_finish(attempt_model, status, quota_hit)
-                if status == 200:
+                if quota_hit or status == 200:
+                    # A known account/workspace quota applies to the session,
+                    # not one physical tier. Never escalate through every tier.
                     break
 
                 idx = TIERS.index(attempt_model) if attempt_model in TIERS else -1
@@ -2112,31 +2252,32 @@ class Handler(BaseHTTPRequestHandler):
                 quota_error = terminal_quota_error(status, resp.headers, data)
                 if quota_error is not None:
                     # Account/workspace exhaustion is terminal but not evidence
-                    # that this physical tier is unhealthy. Streaming callers
-                    # get the native-looking response.failed envelope below;
-                    # non-stream callers keep the upstream HTTP error verbatim.
+                    # that this physical tier is unhealthy.
                     quota_hit = True
                 if quota_error is not None and stream_requested:
-                    # Terminal ChatGPT subscription/quota exhaustion: return a
-                    # 200 SSE response.failed so Codex shows the native
-                    # usage-limit message and treats it as terminal rather than
-                    # burning its HTTP retry budget through the generic provider.
-                    out_kind = "sse"
-                    stream = quota_failure_sse(quota_error)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-                    self.send_header("Content-Length", str(len(stream)))
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    response_started = True
-                    self.wfile.write(stream)
-                    self.wfile.flush()
-                    attempt["terminal_type"] = "response.failed"
-                    # Already handled for this client; preserve that this was
-                    # terminal quota so breaker/cache health are not falsified.
-                    quota_hit = True
-                    status = 200
-                    error_bytes = None
+                    if exact_native_route_supported():
+                        # Preserve native HTTP quota semantics across the local
+                        # generic-provider hop. The guarded Node hook unwraps
+                        # this marker after LiteLLM and restores a canonical
+                        # HTTP 429 usage_limit_reached response.
+                        out_kind = "error"
+                        error_bytes = quota_passthrough_body(quota_error, resp.headers)
+                    else:
+                        # Compatibility path for an upstream Codex Router whose
+                        # source no longer matches the guarded managed hook.
+                        out_kind = "sse"
+                        stream = quota_failure_sse(quota_error)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                        self.send_header("Content-Length", str(len(stream)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        response_started = True
+                        self.wfile.write(stream)
+                        self.wfile.flush()
+                        attempt["terminal_type"] = "response.failed"
+                        status = 200
+                        error_bytes = None
                 else:
                     error_bytes = None
                     if status != 200 and stream_requested:
@@ -2298,72 +2439,3 @@ def installation_check(require_model=True):
                 catalog = json.loads(raw.decode("utf-8-sig")) if resp.status == 200 else {}
                 rows = catalog.get("data") if isinstance(catalog, dict) else None
                 ids = {
-                    row.get("id")
-                    for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
-                } if isinstance(rows, list) else set()
-                loaded = VIRTUAL_MODEL_SLUG in ids
-                checks.append({
-                    "name": "jev_model",
-                    "ok": loaded,
-                    "detail": "jev/auto loaded"
-                              if loaded
-                              else "jev/auto missing; run setup-local.sh or curate-models, then restart Codex Router",
-                })
-            except Exception as exc:
-                checks.append({
-                    "name": "jev_model",
-                    "ok": False,
-                    "detail": f"{type(exc).__name__}: {str(exc)[:180]}",
-                })
-            finally:
-                conn.close()
-        else:
-            checks.append({
-                "name": "jev_model",
-                "ok": False,
-                "detail": "skipped: Codex Router or caller secret not ready",
-            })
-
-    return {
-        "ok": all(item["ok"] for item in checks),
-        "service": "jev-router",
-        "version": VERSION,
-        "policy_version": POLICY_VERSION,
-        "checks": checks,
-    }
-
-
-def print_installation_check(result):
-    for item in result["checks"]:
-        mark = "OK" if item["ok"] else "FAIL"
-        print(f"[{mark:4}] {item['name']}: {item['detail']}")
-    print("READY" if result["ok"] else "NOT READY")
-    return 0 if result["ok"] else 1
-
-
-def main(argv=None):
-    argv = list(argv if argv is not None else __import__("sys").argv[1:])
-    if argv == ["--check"]:
-        return print_installation_check(installation_check(require_model=True))
-    if argv == ["--check-core"]:
-        return print_installation_check(installation_check(require_model=False))
-    if argv:
-        print("usage: python3 server/jev_server.py [--check|--check-core]", flush=True)
-        return 2
-
-    server = ThreadingHTTPServer(LISTEN, Handler)
-    server.daemon_threads = True
-    os.makedirs(STATE, exist_ok=True)
-    for path in (LOG_PATH, SHADOW_EVAL_PATH, SESSION_PATH):
-        try:
-            if os.path.exists(path):
-                os.chmod(path, 0o600)
-        except OSError:
-            pass
-    print(f"[jev-router] ready on {LISTEN[0]}:{LISTEN[1]}", flush=True)
-    server.serve_forever()
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
