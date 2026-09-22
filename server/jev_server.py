@@ -50,8 +50,9 @@ compaction. Capability profiles are priors; outcome quality requires evaluation.
 Log: ~/.codex/codex-router/jev-router-live.jsonl
 
 Auto routing is OpenAI-only: the served model must remain one of the four
-native tiers (Luna, Terra, Sol, Astra). Terminal native quota failures are
-carried across the generic-provider hop as a non-retryable Responses failure;
+native tiers (Luna, Terra, Sol, Astra). Managed installs restore hard native
+ChatGPT/Codex usage limits as canonical HTTP 429 responses after the local Jev
+provider hop; an SSE terminal-error envelope remains the compatibility fallback.
 Jev never substitutes a third-party model.
 """
 import base64
@@ -159,11 +160,11 @@ ROUTE_CACHE_MAX_ENTRIES = 256
 ROUTE_SINGLEFLIGHT_WAIT_S = 8.0
 
 # Native ChatGPT usage exhaustion is special. If it crosses the generic jev
-# provider boundary as HTTP 429, the outer Codex Router rewrites the body and
-# Codex's HTTP transport spends its retry budget before it can classify the
-# subscription error. For streaming turns we therefore carry terminal quota as
-# a successful HTTP SSE envelope with a fatal Responses error code. Current
-# Codex classifies insufficient_quota as terminal UsageLimitExceeded.
+# provider boundary as an ordinary provider 429, Codex Router rewrites the body
+# and Codex can exhaust its retry budget before recognizing the account limit.
+# Managed installs therefore carry a bounded local marker through LiteLLM and
+# restore Codex's canonical HTTP 429 at the authenticated caller edge. The
+# fatal SSE quota code remains only as compatibility fallback.
 TERMINAL_QUOTA_TYPES = frozenset({
     "usage_limit_reached",
     "usage_limit",
