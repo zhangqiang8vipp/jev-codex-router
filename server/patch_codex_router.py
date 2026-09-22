@@ -107,6 +107,7 @@ function jevNativeQuotaEnvelope(bodyText) {
     const name = String(rawName).toLowerCase();
     const value = String(rawValue);
     if (
+      !/[\r\n]/.test(value) &&
       value.length <= 512 &&
       (allowedExact.has(name) || windowHeader.test(name) || limitName.test(name))
     ) {
