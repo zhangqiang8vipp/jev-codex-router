@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Install the scoped exact-native-route hook into a Codex Router checkout.
+"""Install Jev's scoped native-route/quota hooks into Codex Router.
 
 Jev forwards a concrete native GPT tier back through Codex Router's authenticated
-caller edge. Codex Router's native redirect normally catches every native slug,
-including that already-routed tier. Reusing the router's existing
-x-codex-router-exact-route probe as an exact-model signal lets the caller edge
-skip only the native redirect for this authenticated request, without moving the
-router-wide native-redirect state file.
+caller edge. The managed hooks make the authenticated exact-route probe bypass
+only native-redirect for that concrete request, and restore hard native Codex
+usage-limit 429s after the local generic-provider hop.
 
-The patch is intentionally tiny, idempotent, and fail-closed: if the upstream
-source shape is no longer recognized, this script refuses to rewrite it. A
+The patch is intentionally narrow, idempotent, and fail-closed: if an upstream
+source anchor is no longer recognized, this script refuses to rewrite it. A
 state marker is armed only after the Codex Router service successfully restarts
 on the patched source, so Jev never trusts a source edit that is not live yet.
 """
