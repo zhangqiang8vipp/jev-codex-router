@@ -378,7 +378,7 @@ class TerminalQuotaTranslation(unittest.TestCase):
                 self._attempts = []
 
             def send_response(self, *_args, **_kwargs):
-                self.fail("managed quota path must not commit a response")
+                raise AssertionError("managed quota path must not commit a response")
 
         handler = FakeHandler()
         with mock.patch.object(jev.http.client, "HTTPConnection", FakeConnection), \
