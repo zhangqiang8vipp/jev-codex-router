@@ -413,7 +413,10 @@ def terminal_quota_error(status, headers, data):
     message = inner.get("message")
     if not isinstance(message, str) or not message.strip():
         message = "You have reached your Codex usage limit."
-    message = message.strip()[:2048]
+    message = message.strip()
+    encoded_message = message.encode("utf-8")
+    if len(encoded_message) > 2048:
+        message = encoded_message[:2048].decode("utf-8", "ignore")
 
     plan_type = inner.get("plan_type")
     if not isinstance(plan_type, str) or not plan_type.strip() or len(plan_type) > 64:
