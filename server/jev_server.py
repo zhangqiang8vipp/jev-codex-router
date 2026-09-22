@@ -1948,9 +1948,11 @@ class Handler(BaseHTTPRequestHandler):
                         error_bytes = json.dumps({"error": {"type": "server_error",
                             "message": f"router connection failed: {exc}"}}).encode("utf-8")
 
-                # Terminal subscription exhaustion is carried to Codex as a
-                # response.failed SSE. It is handled, not a healthy upstream
-                # success and not a reason to probe another tier.
+                # Terminal subscription exhaustion is carried to Codex through
+                # the native-quota transport (canonical HTTP 429 when the
+                # managed caller-edge hook is armed, SSE fallback otherwise).
+                # It is handled, not a healthy upstream success and not a
+                # reason to probe another tier.
                 breaker_finish(attempt_model, status, quota_hit)
                 if quota_hit or status == 200:
                     # A known account/workspace quota applies to the session,
