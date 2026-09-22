@@ -8,15 +8,29 @@ import patch_codex_router as patcher
 import jev_server as jev
 
 
-def upstream_fixture(condition):
+def upstream_fixture(condition, include_quota_anchor=True):
+    failure = (
+        "      failedBodyText = await boundedResponseText(\n"
+        "        upstream,\n"
+        "        MAX_BUFFERED_RESPONSE_BYTES,\n"
+        "        controller.signal,\n"
+        "      );\n"
+        if include_quota_anchor
+        else ""
+    )
     return (
-        "async function handleResponses(request) {\n"
+        "async function handleResponses(request, response, requestUrl) {\n"
         "  const exactRouteProbe = exactRouteProbeRequested(request.headers);\n"
         "  let registeredRoute;\n"
         f"    {condition}\n"
         "      const redirect = MODEL_BY_SLUG.get(readNativeRedirect());\n"
         "      if (redirect) registeredRoute = redirect;\n"
         "    }\n"
+        "  let failedBodyText;\n"
+        "  if (route && !upstream.ok) {\n"
+        + failure
+        + "    let verdict = classifyRoutedFailure({});\n"
+        "  }\n"
         "}\n"
     )
 
@@ -38,6 +52,30 @@ class CodexRouterExactRoutePatch(unittest.TestCase):
         second, changed = patcher.patch_router_text(patched)
         self.assertFalse(changed)
         self.assertEqual(second, patched)
+
+
+    def test_patch_adds_native_quota_passthrough_hook(self):
+        original = upstream_fixture(patcher.ORIGINAL_CONDITION)
+        patched, changed = patcher.patch_router_text(original)
+        self.assertTrue(changed)
+        self.assertIn(patcher.QUOTA_MARKER, patched)
+        self.assertIn(patcher.QUOTA_PASSTHROUGH_SENTINEL, patched)
+        self.assertIn("route.provider === \"jev\"", patched)
+        self.assertIn("writeJson(response, 429", patched)
+
+    def test_exact_only_old_patch_is_upgraded_with_quota_hook(self):
+        original = upstream_fixture(patcher.PATCHED_CONDITION)
+        patched, changed = patcher.patch_router_text(original)
+        self.assertTrue(changed)
+        self.assertTrue(patcher.source_supports_exact_native_route(patched))
+
+    def test_missing_quota_failure_anchor_fails_closed(self):
+        original = upstream_fixture(
+            patcher.ORIGINAL_CONDITION,
+            include_quota_anchor=False,
+        )
+        with self.assertRaises(patcher.PatchError):
+            patcher.patch_router_text(original)
 
     def test_unrecognized_upstream_shape_fails_closed(self):
         source = upstream_fixture("if (somethingElse) {")
@@ -92,7 +130,9 @@ class CodexRouterExactRoutePatch(unittest.TestCase):
             source_dir.mkdir()
             router = source_dir / "router.mjs"
             router.write_text(
-                upstream_fixture(patcher.PATCHED_CONDITION),
+                patcher.patch_router_text(
+                    upstream_fixture(patcher.ORIGINAL_CONDITION)
+                )[0],
                 encoding="utf-8",
             )
             state = root / "state"
@@ -116,7 +156,9 @@ class JevExactRouteCapability(unittest.TestCase):
         source_dir.mkdir()
         router = source_dir / "router.mjs"
         router.write_text(
-            upstream_fixture(patcher.PATCHED_CONDITION),
+            patcher.patch_router_text(
+                upstream_fixture(patcher.ORIGINAL_CONDITION)
+            )[0],
             encoding="utf-8",
         )
         state = root / "state"
@@ -147,7 +189,9 @@ class JevExactRouteCapability(unittest.TestCase):
             source_dir = root / "src"
             source_dir.mkdir()
             (source_dir / "router.mjs").write_text(
-                upstream_fixture(patcher.PATCHED_CONDITION),
+                patcher.patch_router_text(
+                    upstream_fixture(patcher.ORIGINAL_CONDITION)
+                )[0],
                 encoding="utf-8",
             )
             state = root / "state"
