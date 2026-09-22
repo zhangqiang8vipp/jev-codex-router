@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -188,9 +189,9 @@ class JevExactRouteCapability(unittest.TestCase):
             root = Path(tmp)
             router, state = self._armed_fixture(root)
             marker = patcher.marker_path(state)
-            value = __import__("json").loads(marker.read_text(encoding="utf-8"))
+            value = json.loads(marker.read_text(encoding="utf-8"))
             value["version"] = 1
-            marker.write_text(__import__("json").dumps(value), encoding="utf-8")
+            marker.write_text(json.dumps(value), encoding="utf-8")
             with mock.patch.object(jev, "CODEX_ROUTER_DIR", str(root)), \
                  mock.patch.object(jev, "STATE", str(state)), \
                  mock.patch.dict(
