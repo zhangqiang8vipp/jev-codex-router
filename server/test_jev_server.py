@@ -287,6 +287,28 @@ class TerminalQuotaTranslation(unittest.TestCase):
             with self.subTest(status=status):
                 self.assertIsNone(jev.terminal_quota_error(status, {}, quotaish))
 
+    def test_quota_marker_payload_is_bounded(self):
+        body = json.dumps({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "\U0001f600" * 3000,
+            }
+        }).encode()
+        error = jev.terminal_quota_error(429, {}, body)
+        self.assertLessEqual(len(error["message"].encode("utf-8")), 2048)
+
+        headers = {
+            f"x-limit-{index:02d}-primary-used-percent": "100"
+            for index in range(100)
+        }
+        safe = jev.safe_quota_headers(headers)
+        self.assertEqual(len(safe), jev._QUOTA_SAFE_HEADER_MAX)
+
+        wire = jev.quota_passthrough_body(error, headers)
+        marker = json.loads(wire)["error"]["message"]
+        token = marker[len(jev._NATIVE_QUOTA_MARKER_PREFIX):]
+        self.assertLessEqual(len(token), 32 * 1024)
+
     def test_passthrough_envelope_preserves_only_safe_quota_metadata(self):
         error = {
             "type": "usage_limit_reached",
