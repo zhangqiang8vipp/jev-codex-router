@@ -334,6 +334,78 @@ class TerminalQuotaTranslation(unittest.TestCase):
         )
 
 
+    def test_forward_returns_marker_429_without_committing_stream(self):
+        body = json.dumps({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "limit",
+                "plan_type": "pro",
+                "resets_at": 1_738_888_888,
+            }
+        }).encode()
+
+        class FakeResponse:
+            status = 429
+            headers = {
+                "x-codex-rate-limit-reached-type":
+                    "workspace_member_usage_limit_reached",
+            }
+
+            def getheader(self, name):
+                return "application/json" if name.lower() == "content-type" else None
+
+            def read(self):
+                return body
+
+        class FakeConnection:
+            sock = None
+
+            def __init__(self, *_args, **_kwargs):
+                self.request_args = None
+                self.closed = False
+
+            def request(self, *args, **kwargs):
+                self.request_args = (args, kwargs)
+
+            def getresponse(self):
+                return FakeResponse()
+
+            def close(self):
+                self.closed = True
+
+        class FakeHandler:
+            def __init__(self):
+                self._attempts = []
+
+            def send_response(self, *_args, **_kwargs):
+                self.fail("managed quota path must not commit a response")
+
+        handler = FakeHandler()
+        with mock.patch.object(jev.http.client, "HTTPConnection", FakeConnection), \
+             mock.patch.object(jev, "caller_secret", return_value="secret"), \
+             mock.patch.object(jev, "exact_native_route_supported", return_value=True):
+            result = jev.Handler._forward(
+                handler,
+                {"model": jev.SOL, "stream": True},
+                "/v1/responses",
+                True,
+                False,
+                "",
+                jev.SOL,
+            )
+
+        status, out_kind, _ctype, quota_hit, _u, _r, error_bytes = result
+        self.assertEqual(status, 429)
+        self.assertEqual(out_kind, "error")
+        self.assertTrue(quota_hit)
+        self.assertIsNotNone(error_bytes)
+        outer = json.loads(error_bytes)
+        self.assertTrue(
+            outer["error"]["message"].startswith(jev._NATIVE_QUOTA_MARKER_PREFIX)
+        )
+        self.assertEqual(handler._attempts[-1]["status"], 429)
+
+
 class ResponseIdContinuity(unittest.TestCase):
     """One response id per relayed stream, however many gateways touched it.
 
