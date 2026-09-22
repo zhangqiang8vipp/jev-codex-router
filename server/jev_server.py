@@ -413,6 +413,7 @@ def terminal_quota_error(status, headers, data):
     message = inner.get("message")
     if not isinstance(message, str) or not message.strip():
         message = "You have reached your Codex usage limit."
+    message = message.strip()[:2048]
 
     plan_type = inner.get("plan_type")
     if not isinstance(plan_type, str) or not plan_type.strip() or len(plan_type) > 64:
@@ -437,7 +438,7 @@ def terminal_quota_error(status, headers, data):
 
     error = {
         "type": canonical_type,
-        "message": message.strip(),
+        "message": message,
     }
     if canonical_type == "insufficient_quota":
         error["code"] = code if code in TERMINAL_QUOTA_CODES else "insufficient_quota"
@@ -462,6 +463,7 @@ _QUOTA_WINDOW_HEADER_RX = re.compile(
     r"(?:used-percent|window-minutes|reset-at)$"
 )
 _QUOTA_LIMIT_NAME_RX = re.compile(r"^x-[a-z0-9][a-z0-9-]{0,63}-limit-name$")
+_QUOTA_SAFE_HEADER_MAX = 32
 _NATIVE_QUOTA_MARKER_PREFIX = "__JEV_NATIVE_QUOTA_V1__:"
 
 
@@ -483,6 +485,8 @@ def safe_quota_headers(headers):
         value = str(raw_value).strip()
         if value and len(value) <= 512:
             out[name] = value
+            if len(out) >= _QUOTA_SAFE_HEADER_MAX:
+                break
     return out
 
 
