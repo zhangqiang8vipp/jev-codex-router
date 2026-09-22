@@ -545,6 +545,7 @@ _NATIVE_REDIRECT_HELD_NAME = "native-redirect.json.routing-held"
 _NATIVE_REDIRECT_DEPTH = 0
 _EXACT_NATIVE_ROUTE_ENV = "JEV_EXACT_NATIVE_ROUTE"
 _EXACT_NATIVE_ROUTE_MARKER = "jev-exact-native-route.json"
+_EXACT_NATIVE_ROUTE_MARKER_VERSION = 2
 _EXACT_NATIVE_ROUTE_CONDITION = b"if (!registeredRoute && requestedModel && !exactRouteProbe) {"
 _EXACT_NATIVE_ROUTE_PROBE = b"const exactRouteProbe = exactRouteProbeRequested(request.headers);"
 _EXACT_NATIVE_ROUTE_REDIRECT = b"const redirect = MODEL_BY_SLUG.get(readNativeRedirect());"
@@ -599,7 +600,7 @@ def exact_native_route_supported():
         )
         supported = (
             isinstance(marker, dict)
-            and marker.get("version") == 1
+            and marker.get("version") == _EXACT_NATIVE_ROUTE_MARKER_VERSION
             and same_router
             and marker.get("router_sha256") == hashlib.sha256(data).hexdigest()
             and _EXACT_NATIVE_ROUTE_CONDITION in data
