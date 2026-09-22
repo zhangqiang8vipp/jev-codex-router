@@ -41,9 +41,11 @@ next-turn tool success/error. It never replays a second model route.
    enabled. Never clear or overwrite a newer operator redirect.
 9. Concrete native tiers selected by Jev must re-enter Codex Router with its
    authenticated `x-codex-router-exact-route: 1` probe. The managed install
-   applies a guarded one-line caller-edge patch so that exact probe bypasses
-   only `native-redirect` for that request. Keep file suppression only as the
-   compatibility fallback when that scoped hook is unavailable.
+   applies guarded caller-edge hooks so that exact probe bypasses only
+   `native-redirect` for that request and hard native Codex account/workspace
+   quota is restored as a canonical HTTP 429 after the local Jev provider hop.
+   Keep file suppression / terminal-SSE handling only as compatibility
+   fallbacks when those scoped hooks are unavailable.
 10. **Do not call Jev merely because Codex emitted another Responses call.**
     A valid Route Lease must be reused for tool/background/compaction
     continuations. A meaningful new user turn or missing/invalid lease may
@@ -302,7 +304,9 @@ build `desktop/JevAutoToggle/JevAutoToggle.csproj` with .NET 8. CI contains a
 - Model-pair comparisons are observational because the router chooses which
   tasks each pair sees.
 - Current upstream Codex Router does not make its exact-route probe bypass
-  `native-redirect`. The managed service therefore applies one guarded source
-  condition and arms it only after a successful router restart. If a future
-  upstream update changes that source shape, Jev falls back to the older
-  suppression path instead of guessing at a rewrite.
+  `native-redirect`, and its generic-provider error translation cannot preserve
+  native ChatGPT usage-limit semantics across the Jev hop. The managed service
+  therefore applies two guarded caller-edge hooks (exact native route + native
+  quota pass-through) and arms them only after a successful router restart. If
+  a future upstream update changes either source shape, Jev falls back to the
+  compatibility paths instead of guessing at a rewrite.
