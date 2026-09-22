@@ -169,6 +169,10 @@ def patch_router_text(text: str) -> tuple[str, bool]:
     if EXACT_PROBE_DECLARATION not in text:
         raise PatchError("Codex Router exact-route probe declaration was not found.")
 
+    newline = "\r\n" if "\r\n" in text else "\n"
+    quota_helper = QUOTA_HELPER.replace("\n", newline)
+    quota_block = QUOTA_PASSTHROUGH_BLOCK.replace("\n", newline)
+    quota_failure_anchor = QUOTA_FAILURE_ANCHOR.replace("\n", newline)
     changed = False
 
     if PATCHED_CONDITION not in text:
@@ -201,15 +205,15 @@ def patch_router_text(text: str) -> tuple[str, bool]:
         handle_at = text.find(HANDLE_RESPONSES_ANCHOR)
         if handle_at < 0:
             raise PatchError("Codex Router Responses handler anchor was not found.")
-        text = text[:handle_at] + QUOTA_HELPER + "\n" + text[handle_at:]
+        text = text[:handle_at] + quota_helper + newline + text[handle_at:]
         changed = True
 
     if QUOTA_PASSTHROUGH_SENTINEL not in text:
-        anchor_at = text.find(QUOTA_FAILURE_ANCHOR)
+        anchor_at = text.find(quota_failure_anchor)
         if anchor_at < 0:
             raise PatchError("Codex Router routed-failure anchor was not found.")
-        insert_at = anchor_at + len(QUOTA_FAILURE_ANCHOR)
-        text = text[:insert_at] + QUOTA_PASSTHROUGH_BLOCK + text[insert_at:]
+        insert_at = anchor_at + len(quota_failure_anchor)
+        text = text[:insert_at] + quota_block + text[insert_at:]
         changed = True
 
     if not source_supports_exact_native_route(text):
