@@ -324,6 +324,7 @@ class TerminalQuotaTranslation(unittest.TestCase):
                 "workspace_member_usage_limit_reached",
             "X-Private-Header": "must-not-cross",
             "Authorization": "must-not-cross",
+            "X-Codex-Promo-Message": "safe\r\nunsafe",
         })
         outer = json.loads(wire)
         marker = outer["error"]["message"]
@@ -339,6 +340,7 @@ class TerminalQuotaTranslation(unittest.TestCase):
         )
         self.assertNotIn("x-private-header", decoded["headers"])
         self.assertNotIn("authorization", decoded["headers"])
+        self.assertNotIn("x-codex-promo-message", decoded["headers"])
 
     def test_sse_fallback_is_still_terminal_when_node_hook_is_unavailable(self):
         error = {
