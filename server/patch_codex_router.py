@@ -32,8 +32,119 @@ PATCHED_CONDITION = "if (!registeredRoute && requestedModel && !exactRouteProbe)
 ORIGINAL_CONDITION = "if (!registeredRoute && requestedModel) {"
 EXACT_PROBE_DECLARATION = "const exactRouteProbe = exactRouteProbeRequested(request.headers);"
 REDIRECT_ANCHOR = "const redirect = MODEL_BY_SLUG.get(readNativeRedirect());"
+HANDLE_RESPONSES_ANCHOR = "async function handleResponses(request, response, requestUrl) {"
+QUOTA_FAILURE_ANCHOR = """      failedBodyText = await boundedResponseText(
+        upstream,
+        MAX_BUFFERED_RESPONSE_BYTES,
+        controller.signal,
+      );
+"""
+QUOTA_MARKER = "__JEV_NATIVE_QUOTA_V1__"
+QUOTA_HELPER_NAME = "jevNativeQuotaEnvelope"
+QUOTA_PASSTHROUGH_SENTINEL = "jev-native-quota-pass-through"
 MARKER_NAME = "jev-exact-native-route.json"
-MARKER_VERSION = 1
+MARKER_VERSION = 2
+
+QUOTA_HELPER = r'''
+function jevNativeQuotaEnvelope(bodyText) {
+  const marker = "__JEV_NATIVE_QUOTA_V1__:";
+  const at = String(bodyText || "").indexOf(marker);
+  if (at < 0) return undefined;
+  const match = /^[A-Za-z0-9_-]+/.exec(String(bodyText).slice(at + marker.length));
+  const token = match?.[0];
+  if (!token || token.length > 32 * 1024) return undefined;
+
+  let decoded;
+  try {
+    decoded = JSON.parse(Buffer.from(token, "base64url").toString("utf8"));
+  } catch {
+    return undefined;
+  }
+  if (decoded?.version !== 1 || !decoded.error || typeof decoded.error !== "object") {
+    return undefined;
+  }
+
+  const type = decoded.error.type;
+  if (!["usage_limit_reached", "usage_not_included", "insufficient_quota"].includes(type)) {
+    return undefined;
+  }
+  const message =
+    typeof decoded.error.message === "string" && decoded.error.message.length <= 2048
+      ? decoded.error.message
+      : "You have reached your Codex usage limit.";
+  const error = { type, message };
+  if (
+    typeof decoded.error.code === "string" &&
+    decoded.error.code.length <= 128
+  ) {
+    error.code = decoded.error.code;
+  }
+  if (
+    typeof decoded.error.plan_type === "string" &&
+    decoded.error.plan_type.length <= 64
+  ) {
+    error.plan_type = decoded.error.plan_type;
+  }
+  if (
+    Number.isSafeInteger(decoded.error.resets_at) &&
+    decoded.error.resets_at > 0
+  ) {
+    error.resets_at = decoded.error.resets_at;
+  }
+
+  const allowedExact = new Set([
+    "retry-after",
+    "x-codex-active-limit",
+    "x-codex-promo-message",
+    "x-codex-rate-limit-reached-type",
+    "x-codex-credits-has-credits",
+    "x-codex-credits-unlimited",
+    "x-codex-credits-balance",
+  ]);
+  const windowHeader =
+    /^x-[a-z0-9][a-z0-9-]{0,63}-(?:primary|secondary)-(?:used-percent|window-minutes|reset-at)$/;
+  const limitName = /^x-[a-z0-9][a-z0-9-]{0,63}-limit-name$/;
+  const headers = {};
+  for (const [rawName, rawValue] of Object.entries(decoded.headers || {})) {
+    const name = String(rawName).toLowerCase();
+    const value = String(rawValue);
+    if (
+      value.length <= 512 &&
+      (allowedExact.has(name) || windowHeader.test(name) || limitName.test(name))
+    ) {
+      headers[name] = value;
+    }
+  }
+  return { error, headers };
+}
+'''
+
+QUOTA_PASSTHROUGH_BLOCK = r'''      // jev-native-quota-pass-through: Jev's inner exact native call may
+      // return the real ChatGPT account/workspace hard limit. LiteLLM wraps a
+      // routed provider 429, so unwrap only Jev's authenticated local marker
+      // and restore the canonical HTTP 429 shape Codex itself understands.
+      if (route.provider === "jev" && upstream.status === 429) {
+        const nativeQuota = jevNativeQuotaEnvelope(failedBodyText);
+        if (nativeQuota) {
+          for (const [name, value] of Object.entries(nativeQuota.headers)) {
+            response.setHeader(name, value);
+          }
+          writeJson(response, 429, { error: nativeQuota.error });
+          recordObservedUsage({
+            model: route.slug,
+            provider: canonicalProviderId(route.provider),
+            status: 429,
+            durationMs: Date.now() - startedAt,
+            responseStartMs: upstreamLatencyMs,
+          }, diagnostics);
+          observeSubagentOutcome(request, route, 429);
+          finalStatus = 429;
+          activityStatus = 429;
+          usageRecorded = true;
+          return;
+        }
+      }
+'''
 
 
 class PatchError(RuntimeError):
@@ -41,43 +152,71 @@ class PatchError(RuntimeError):
 
 
 def source_supports_exact_native_route(text: str) -> bool:
-    """Whether exact-route already bypasses the router-wide native redirect."""
+    """Whether both managed caller-edge hooks are present."""
     if PATCHED_CONDITION not in text:
         return False
     condition_at = text.find(PATCHED_CONDITION)
     redirect_at = text.find(REDIRECT_ANCHOR, condition_at)
-    return redirect_at >= 0 and redirect_at - condition_at < 600
+    exact_ok = redirect_at >= 0 and redirect_at - condition_at < 600
+    quota_ok = (
+        f"function {QUOTA_HELPER_NAME}" in text
+        and QUOTA_PASSTHROUGH_SENTINEL in text
+        and QUOTA_MARKER in text
+    )
+    return exact_ok and quota_ok
 
 
 def patch_router_text(text: str) -> tuple[str, bool]:
     """Return (patched_text, changed), rejecting unfamiliar upstream shapes."""
     if EXACT_PROBE_DECLARATION not in text:
         raise PatchError("Codex Router exact-route probe declaration was not found.")
-    if source_supports_exact_native_route(text):
-        return text, False
 
-    redirect_at = text.find(REDIRECT_ANCHOR)
-    if redirect_at < 0:
-        raise PatchError("Codex Router native redirect anchor was not found.")
+    changed = False
 
-    window_start = max(0, redirect_at - 500)
-    before_redirect = text[window_start:redirect_at]
-    relative = before_redirect.rfind(ORIGINAL_CONDITION)
-    if relative < 0:
-        raise PatchError("Codex Router native redirect condition is not a recognized shape.")
+    if PATCHED_CONDITION not in text:
+        redirect_at = text.find(REDIRECT_ANCHOR)
+        if redirect_at < 0:
+            raise PatchError("Codex Router native redirect anchor was not found.")
 
-    condition_at = window_start + relative
-    if text.find(ORIGINAL_CONDITION, condition_at + len(ORIGINAL_CONDITION), redirect_at) >= 0:
-        raise PatchError("Codex Router native redirect condition is ambiguous.")
+        window_start = max(0, redirect_at - 500)
+        before_redirect = text[window_start:redirect_at]
+        relative = before_redirect.rfind(ORIGINAL_CONDITION)
+        if relative < 0:
+            raise PatchError("Codex Router native redirect condition is not a recognized shape.")
 
-    patched = (
-        text[:condition_at]
-        + PATCHED_CONDITION
-        + text[condition_at + len(ORIGINAL_CONDITION):]
-    )
-    if not source_supports_exact_native_route(patched):
+        condition_at = window_start + relative
+        if text.find(
+            ORIGINAL_CONDITION,
+            condition_at + len(ORIGINAL_CONDITION),
+            redirect_at,
+        ) >= 0:
+            raise PatchError("Codex Router native redirect condition is ambiguous.")
+
+        text = (
+            text[:condition_at]
+            + PATCHED_CONDITION
+            + text[condition_at + len(ORIGINAL_CONDITION):]
+        )
+        changed = True
+
+    if f"function {QUOTA_HELPER_NAME}" not in text:
+        handle_at = text.find(HANDLE_RESPONSES_ANCHOR)
+        if handle_at < 0:
+            raise PatchError("Codex Router Responses handler anchor was not found.")
+        text = text[:handle_at] + QUOTA_HELPER + "\n" + text[handle_at:]
+        changed = True
+
+    if QUOTA_PASSTHROUGH_SENTINEL not in text:
+        anchor_at = text.find(QUOTA_FAILURE_ANCHOR)
+        if anchor_at < 0:
+            raise PatchError("Codex Router routed-failure anchor was not found.")
+        insert_at = anchor_at + len(QUOTA_FAILURE_ANCHOR)
+        text = text[:insert_at] + QUOTA_PASSTHROUGH_BLOCK + text[insert_at:]
+        changed = True
+
+    if not source_supports_exact_native_route(text):
         raise PatchError("Patched Codex Router source did not pass verification.")
-    return patched, True
+    return text, changed
 
 
 def patch_router_file(router_dir: Path) -> tuple[Path, bool]:
@@ -148,7 +287,7 @@ def write_marker(state_dir: Path, router_path: Path, sha256: str) -> None:
         "version": MARKER_VERSION,
         "router": str(router_path.resolve()),
         "router_sha256": sha256,
-        "mode": "exact-route-probe-bypasses-native-redirect",
+        "mode": "exact-route-probe-plus-native-quota-pass-through",
     }
     fd, tmp_name = tempfile.mkstemp(prefix=".jev-exact-route-", dir=str(state_dir))
     try:
